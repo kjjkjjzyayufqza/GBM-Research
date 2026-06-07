@@ -156,11 +156,7 @@ def extract_entry(
     entry: ArcEntry,
 ) -> tuple[bytes, str]:
     end = entry.offset + entry.compressed_size
-    if entry.offset < 0 or end > len(archive_data):
-        raise ValueError(
-            f"entry {entry.index} points outside archive: "
-            f"offset=0x{entry.offset:x}, size=0x{entry.compressed_size:x}"
-        )
+    validate_entry_bounds(len(archive_data), entry)
 
     encrypted_payload = archive_data[entry.offset:end]
     decrypted_payload = decrypt_mt_blowfish_swapped(cipher, encrypted_payload)
@@ -198,6 +194,58 @@ def load_archive(path: Path, key: bytes) -> tuple[bytes, list[ArcEntry]]:
     return archive_data, parse_entries(toc, file_count)
 
 
+def validate_entry_bounds(archive_size: int, entry: ArcEntry) -> None:
+    end = entry.offset + entry.compressed_size
+    if entry.offset < 0 or end > archive_size:
+        raise ValueError(
+            f"entry {entry.index} points outside archive: "
+            f"offset=0x{entry.offset:x}, size=0x{entry.compressed_size:x}"
+        )
+
+
+def resolve_dump_decrypted_path(output: Path, archive: Path) -> Path:
+    """Resolve a dump target to a concrete .arc file path.
+
+    Existing directories, or paths ending in a path separator, are treated as
+    output folders and receive ``<archive-stem>_decrypted.arc``.
+    """
+
+    output_text = str(output)
+    if output.exists() and output.is_dir():
+        return output / f"{archive.stem}_decrypted.arc"
+    if output_text.endswith(("/", "\\")):
+        return output / f"{archive.stem}_decrypted.arc"
+    return output
+
+
+def dump_decrypted_archive(
+    archive_data: bytes,
+    entries: list[ArcEntry],
+    cipher: Blowfish.BlowfishCipher,
+    output_path: Path,
+) -> None:
+    """Write a single ARCC file with Blowfish-decrypted TOC and payloads.
+
+    Payloads keep their original zlib-compressed form; only the Blowfish layer
+    is removed. The output archive preserves the input size and entry layout.
+    """
+
+    output = bytearray(archive_data)
+    toc_size = len(entries) * ENTRY_SIZE
+    encrypted_toc = bytes(output[8 : 8 + toc_size])
+    output[8 : 8 + toc_size] = decrypt_mt_blowfish_swapped(cipher, encrypted_toc)
+
+    for entry in entries:
+        validate_entry_bounds(len(output), entry)
+        start = entry.offset
+        end = start + entry.compressed_size
+        encrypted_payload = bytes(output[start:end])
+        output[start:end] = decrypt_mt_blowfish_swapped(cipher, encrypted_payload)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(output)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Extract Gundam Breaker Mobile ARCC v8 archives."
@@ -221,6 +269,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Manifest JSON path. Defaults to <output>/_manifest.json when extracting.",
     )
+    parser.add_argument(
+        "--dump-decrypted",
+        type=Path,
+        metavar="OUTPUT",
+        help=(
+            "Write a single decrypted ARCC file. Pass a file path or an output "
+            "directory (writes <archive-stem>_decrypted.arc). Blowfish layers are "
+            "removed but zlib-compressed payloads are preserved."
+        ),
+    )
     args = parser.parse_args(argv)
 
     key = bytes.fromhex(args.key_hex)
@@ -237,6 +295,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"type=0x{entry.type_code:08x} "
                 f"{entry.name}"
             )
+        return 0
+
+    if args.dump_decrypted:
+        dump_path = resolve_dump_decrypted_path(args.dump_decrypted, args.archive)
+        cipher = Blowfish.new(key, Blowfish.MODE_ECB)
+        dump_decrypted_archive(archive_data, entries, cipher, dump_path)
+        print(
+            f"dumped decrypted archive: {len(entries)} entries, "
+            f"{len(archive_data)} bytes -> {dump_path}"
+        )
         return 0
 
     output_dir = args.output or Path(f"{args.archive.stem}_extracted")

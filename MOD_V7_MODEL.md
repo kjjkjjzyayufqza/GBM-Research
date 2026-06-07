@@ -64,6 +64,17 @@ scale     = 0.01
 
 This conversion is validated by the Blender preview and FBX round-trip bounds.
 
+`gbm_mod_obj_probe.py` supports both `--axis-mode engine` and
+`--axis-mode blender`. The current `gbm_start.py` pipeline keeps the
+intermediate OBJ in `engine` mode and lets `gbm_blender_convert.py` own the DCC
+axis correction during FBX export.
+
+For manual inspection, importing the raw OBJ into Blender with the default OBJ
+import settings usually produces `rotation = (90, 0, 0)`. A front-facing view
+typically needs an extra `Z = +90` after import or custom import-axis choices.
+Treat that as a DCC import convention until the native MOD forward direction is
+proven more rigorously.
+
 ## Skinning Context
 
 Skin weights and the 91-bone hierarchy have been parsed experimentally:

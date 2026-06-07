@@ -13,20 +13,21 @@ gbm_arc_extract.py
   -> gbm_blender_convert.py
 ```
 
-Typical use from the repository root:
+Typical all-model export from the repository root:
 
 ```powershell
 python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  -o .\out\320900
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235
 ```
 
 Responsibilities:
 
 - create the standard output layout;
 - run ARC extraction and write `_manifest.json`;
-- select a MOD file, optionally by `--model-stem`;
+- select one MOD when `--model-stem` is provided, otherwise export every
+  discovered `.mod`;
+- place all-model outputs under `out\<arc-stem>\models\<unique-model-name>\...`;
 - use `tools\ShaderPackage.mfx` by default for vertex layout decoding;
 - convert TEX files beside the selected MOD to PNG;
 - export bind-pose OBJ;
@@ -36,7 +37,7 @@ Useful options:
 
 | Option | Meaning |
 |---|---|
-| `--model-stem` | Choose a specific model stem such as `ma320900` |
+| `--model-stem` | Restrict export to one model stem such as `ma320900` |
 | `--mfx` | Override the default `tools\ShaderPackage.mfx` path |
 | `--limit` | Partial extraction limit passed to the ARC extractor |
 | `--blender` | Blender executable path |
@@ -55,6 +56,31 @@ Responsibilities:
 - inflate compressed payloads;
 - infer extensions from decoded magic;
 - write a JSON manifest.
+
+## `tools\gbm_equip_lookup.py`
+
+Searches APK-side equip tables for unit serial names and reports the `model_id`
+values that map to numeric `ch/*.arc` archives.
+
+The simpler day-to-day lookup path is to open these generated CSV files:
+
+```text
+tools\gbm_archive_lookup_index.csv
+tools\gbm_equip_parts_index.csv
+```
+
+These CSVs preserve the source unit order from `table_body.etb` instead of
+sorting `serial_name` alphabetically.
+
+Example:
+
+```powershell
+python .\tools\gbm_equip_lookup.py RX-78-2 --exact
+python .\tools\gbm_equip_lookup.py RX-78-2 --exact --gunpla-id 10000
+```
+
+Use this before extraction when the human-facing unit name is known but the
+numeric archive name is not.
 
 ## `tools\gbm_tex_to_png.py`
 
@@ -103,12 +129,15 @@ Current recommended settings:
 ```text
 -o out\obj
 --position-mode bind-pose
---axis-mode blender
+--axis-mode engine
 ```
 
 `--mfx` defaults to `tools\ShaderPackage.mfx`. `-o` can be either a full
 `.obj` path or an output directory. When a directory is passed, the exporter
 writes `<mod stem>.obj` inside it.
+
+`gbm_start.py` intentionally uses `--axis-mode engine` for this intermediate
+OBJ so the Blender conversion stage can own the DCC-axis correction.
 
 ## `tools\gbm_blender_convert.py`
 
@@ -118,6 +147,8 @@ Responsibilities:
 
 - import OBJ;
 - assign BM and optional NM textures;
+- keep the top-level FBX hierarchy flat as `<model>` and optional
+  `<model>_armature`;
 - render a preview;
 - export FBX;
 - clear the scene, re-import the FBX, and report round-trip metrics.

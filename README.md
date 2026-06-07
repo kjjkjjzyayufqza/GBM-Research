@@ -54,6 +54,9 @@ GBM-Research/
     gbm_mod_inspect.py       # MOD structure inspector
     gbm_mfx_inspect.py       # MFX input-layout inspector
     gbm_lmt_inspect.py       # deferred LMT motion inspector
+    gbm_equip_lookup.py      # serial_name/model_id lookup for ch archives
+    gbm_archive_lookup_index.csv # human-readable serial_name -> model_id index
+    gbm_equip_parts_index.csv    # complete part-level equip table index
     ShaderPackage.mfx        # required for MOD vertex layout decoding
   STATUS_STATIC_EXTRACTION.md
   STATIC_EXTRACTION_PIPELINE.md
@@ -62,6 +65,7 @@ GBM-Research/
   MOD_V7_MODEL.md
   MRL_MFX_MATERIALS.md
   RESOURCE_FORMAT_CATALOG.md
+  RESOURCE_NAME_MAPPING.md
   VALIDATION_320900.md
   TOOLS_REFERENCE.md
   IDA_EVIDENCE.md
@@ -122,6 +126,11 @@ The static model path only needs these formats:
 
 See [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) for the broader
 format list.
+See [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) for finding numeric
+`ch/*.arc` files from names such as `RX-78-2`; start with
+`tools/gbm_archive_lookup_index.csv`. The lookup CSV rows follow the source
+order from `table_body.etb`; they are not alphabetically sorted by
+`serial_name`.
 
 ## Extraction Pipeline Architecture
 
@@ -185,7 +194,49 @@ Run from the repository root:
 cd E:\research\Gundam_Breaker_Mobile\GBM-Research
 ```
 
-One-command static extraction:
+One-command static extraction for all discovered models in one archive:
+
+```powershell
+python .\tools\gbm_start.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
+  --force
+```
+
+When `--model-stem` is omitted, `gbm_start.py` exports every discovered `.mod`
+under `out/<arc-stem>/models/<unique-model-name>/...`.
+
+Expected output layout:
+
+```text
+out/12235/
+  extracted/
+    _manifest.json
+    ...
+  models/
+    chr122350/
+      png/
+        _tex_manifest.json
+        chr122350_BM.png
+        chr122350_NM.png
+      obj/
+        chr122350.obj
+        chr122350.mtl
+        chr122350_obj_manifest.json
+      fbx/
+        chr122350.fbx
+        chr122350_BM.png
+        chr122350_NM.png
+        chr122350_preview.png
+        chr122350_fbx_report.json
+    chr122351/
+      ...
+```
+
+If multiple `.mod` files share the same stem, later folders are suffixed as
+`__2`, `__3`, and so on.
+
+Single-model export remains available:
 
 ```powershell
 python .\tools\gbm_start.py `
@@ -195,39 +246,12 @@ python .\tools\gbm_start.py `
   --force
 ```
 
-Expected output layout:
-
-```text
-out/320900/
-  extracted/
-    _manifest.json
-    character/ma320900/mod/ma320900_BM.tex
-    character/ma320900/mod/ma320900_NM.tex
-    character/ma320900/mod/ma320900.mrl
-    character/ma320900/mod/ma320900.mod
-  png/
-    ma320900_BM.png
-    ma320900_NM.png
-    _tex_manifest.json
-  obj/
-    ma320900.obj
-    ma320900.mtl
-    ma320900_obj_manifest.json
-  fbx/
-    ma320900.fbx
-    ma320900_BM.png
-    ma320900_NM.png
-    ma320900_preview.png
-    ma320900_fbx_report.json
-```
-
 Preview commands without writing files:
 
 ```powershell
 python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  -o .\out\320900 `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
   --dry-run
 ```
 
@@ -235,9 +259,8 @@ Stop before FBX export:
 
 ```powershell
 python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  -o .\out\320900 `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
   --skip-fbx
 ```
 
@@ -260,7 +283,7 @@ calls the focused tools in sequence.
 gbm_start.py
   1. calls gbm_arc_extract.py
   2. reads the extraction manifest
-  3. selects a MOD file
+  3. selects one MOD when `--model-stem` is provided, otherwise exports every discovered MOD
   4. calls gbm_tex_to_png.py on the MOD directory
   5. calls gbm_mod_obj_probe.py
   6. optionally calls Blender with gbm_blender_convert.py
@@ -273,7 +296,7 @@ Options:
 | `arc` | yes | Input GBM `.arc` archive |
 | `--mfx` | no | Override `ShaderPackage.mfx`; defaults to `tools/ShaderPackage.mfx` |
 | `-o`, `--output` | no | Output root; defaults to `out/<arc-stem>` |
-| `--model-stem` | no | Prefer a specific model stem, such as `ma320900` |
+| `--model-stem` | no | Restrict export to one model stem such as `ma320900`; when omitted, export every discovered `.mod` under `models/<unique-model-name>` |
 | `--limit` | no | Extract only the first N archive entries |
 | `--blender` | no | Blender executable path |
 | `--skip-fbx` | no | Stop after PNG and OBJ output |
@@ -313,7 +336,7 @@ python .\tools\gbm_mod_obj_probe.py `
   -o .\out\320900\obj `
   --texture .\out\320900\png\ma320900_BM.png `
   --position-mode bind-pose `
-  --axis-mode blender `
+  --axis-mode engine `
   --manifest .\out\320900\obj\ma320900_obj_manifest.json
 ```
 
@@ -346,8 +369,26 @@ static extraction milestone.
 | `tools/gbm_mod_inspect.py` | Inspects MOD structure | JSON report |
 | `tools/gbm_mfx_inspect.py` | Inspects MFX input layouts | JSON report |
 | `tools/gbm_lmt_inspect.py` | Inspects deferred LMT motion files | JSON report |
+| `tools/gbm_equip_lookup.py` | Looks up serial names such as `RX-78-2` | `model_id` and matching `ch/*.arc` variants |
 
 Detailed tool notes live in [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md).
+
+## Orientation Notes
+
+`gbm_start.py` keeps the intermediate OBJ in engine basis and lets
+`gbm_blender_convert.py` own the DCC-axis correction for FBX export.
+
+- Raw OBJ imported into Blender with the default OBJ importer usually appears
+  with `rotation = (90, 0, 0)`. For a front-facing inspection view, add
+  `Z = +90` after import or use custom OBJ import axes. This is currently a DCC
+  import convention, not proof that the source MOD stores non-zero object
+  transforms.
+- FBX export now keeps the top-level hierarchy flat as `<model>` plus
+  `<model>_armature`; it no longer inserts a helper empty such as
+  `<model>_export_root`.
+- Bone rest orientation is driven directly from the imported bind matrices. If
+  a Maya import still shows the root bone facing the wrong direction, validate
+  the bone transform itself rather than a helper parent node.
 
 ## Format Notes
 
@@ -380,6 +421,7 @@ Key documents:
 | Model format | [MOD_V7_MODEL.md](MOD_V7_MODEL.md) |
 | Materials and shader layouts | [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md) |
 | Format catalog | [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) |
+| Resource name mapping | [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) |
 | Validation sample | [VALIDATION_320900.md](VALIDATION_320900.md) |
 | Native reverse engineering anchors | [IDA_EVIDENCE.md](IDA_EVIDENCE.md) |
 | Deferred animation notes | [LMT_ANIMATION_DEFERRED.md](LMT_ANIMATION_DEFERRED.md) |

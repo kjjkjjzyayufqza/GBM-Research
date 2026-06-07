@@ -24,6 +24,7 @@ DEFAULT_MFX = TOOLS_DIR / "ShaderPackage.mfx"
 @dataclass
 class PipelinePaths:
     output_root: Path
+    artifact_root: Path
     extracted_dir: Path
     png_dir: Path
     obj_dir: Path
@@ -59,7 +60,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-stem",
-        help="Prefer a MOD/TEX stem, for example ma320900. Defaults to first MOD.",
+        help=(
+            "Limit export to one MOD/TEX stem, for example ma320900. "
+            "When omitted, every discovered .mod is exported."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -87,16 +91,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print commands and planned outputs without executing.",
     )
+    parser.add_argument(
+        "--lod",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help="LOD level for OBJ and FBX export. 0 is highest detail.",
+    )
     return parser.parse_args()
 
 
-def build_paths(output_root: Path, model_stem: str) -> PipelinePaths:
+def build_paths(
+    output_root: Path, model_stem: str, artifact_root: Path | None = None
+) -> PipelinePaths:
     extracted_dir = output_root / "extracted"
-    png_dir = output_root / "png"
-    obj_dir = output_root / "obj"
-    fbx_dir = output_root / "fbx"
+    artifact_root = artifact_root or output_root
+    png_dir = artifact_root / "png"
+    obj_dir = artifact_root / "obj"
+    fbx_dir = artifact_root / "fbx"
     return PipelinePaths(
         output_root=output_root,
+        artifact_root=artifact_root,
         extracted_dir=extracted_dir,
         png_dir=png_dir,
         obj_dir=obj_dir,
@@ -155,18 +170,21 @@ def entry_output_paths(manifest: dict[str, object]) -> list[Path]:
     return outputs
 
 
-def choose_mod_path(
+def select_mod_paths(
     manifest: dict[str, object],
     extracted_dir: Path,
     model_stem: str | None,
-) -> Path:
+) -> list[Path]:
     manifest_mods = [
         output
         for output in entry_output_paths(manifest)
         if output.suffix.lower() == ".mod"
     ]
     disk_mods = sorted(extracted_dir.rglob("*.mod"))
-    candidates = manifest_mods or disk_mods
+    candidates = sorted(
+        {path for path in (manifest_mods or disk_mods)},
+        key=lambda path: str(path).lower(),
+    )
     if not candidates:
         raise FileNotFoundError(f"No .mod file found under {extracted_dir}")
 
@@ -176,8 +194,33 @@ def choose_mod_path(
             raise FileNotFoundError(
                 f"No .mod matching --model-stem {model_stem!r} found"
             )
-        return matches[0]
-    return sorted(candidates, key=lambda path: str(path).lower())[0]
+        if len(matches) > 1:
+            choices = "\n".join(f"  - {path}" for path in matches)
+            raise FileNotFoundError(
+                f"Multiple .mod files match --model-stem {model_stem!r}:\n{choices}"
+            )
+        return [matches[0]]
+    return candidates
+
+
+def unique_model_directory_names(mod_paths: list[Path]) -> dict[Path, str]:
+    counts: dict[str, int] = {}
+    for mod_path in mod_paths:
+        counts[mod_path.stem] = counts.get(mod_path.stem, 0) + 1
+
+    seen: dict[str, int] = {}
+    directory_names: dict[Path, str] = {}
+    for mod_path in mod_paths:
+        stem = mod_path.stem
+        if counts[stem] == 1:
+            directory_names[mod_path] = stem
+            continue
+        seen[stem] = seen.get(stem, 0) + 1
+        if seen[stem] == 1:
+            directory_names[mod_path] = stem
+            continue
+        directory_names[mod_path] = f"{stem}__{seen[stem]}"
+    return directory_names
 
 
 def choose_texture(
@@ -198,12 +241,13 @@ def print_planned_followup_commands(
     mfx_path: Path,
     blender_path: Path,
     skip_fbx: bool,
+    lod: int,
 ) -> None:
     if not model_stem:
         print(
-            "Dry run stopped after ARC extraction planning because --model-stem "
-            "was not provided. The real run will choose the first extracted .mod "
-            "from the manifest."
+            "Dry run stopped after ARC extraction planning because the final .mod "
+            "list is only known after extraction. The real run will export every "
+            "discovered .mod into output_root\\models\\<unique-model-name>."
         )
         return
 
@@ -240,7 +284,9 @@ def print_planned_followup_commands(
             "--position-mode",
             "bind-pose",
             "--axis-mode",
-            "blender",
+            "engine",
+            "--lod",
+            str(lod),
             "--manifest",
             str(paths.obj_manifest_path),
         ],
@@ -250,29 +296,142 @@ def print_planned_followup_commands(
     if skip_fbx:
         return
 
-    print(
-        format_command(
-            [
-                str(blender_path),
-                "--background",
-                "--python",
-                str(TOOLS_DIR / "gbm_blender_convert.py"),
-                "--",
-                "--input-obj",
-                str(paths.obj_path),
-                "--output-fbx",
-                str(paths.fbx_path),
-                "--texture",
-                str(base_texture),
-                "--normal-texture",
-                str(normal_texture),
-                "--preview",
-                str(paths.preview_path),
-                "--report",
-                str(paths.fbx_report_path),
-            ]
-        )
+    blender_command = [
+        str(blender_path),
+        "--background",
+        "--python",
+        str(TOOLS_DIR / "gbm_blender_convert.py"),
+        "--",
+        "--input-obj",
+        str(paths.obj_path),
+        "--output-fbx",
+        str(paths.fbx_path),
+        "--texture",
+        str(base_texture),
+        "--normal-texture",
+        str(normal_texture),
+        "--mod",
+        str(assumed_mod),
+        "--mfx",
+        str(mfx_path),
+        "--lod",
+        str(lod),
+        "--preview",
+        str(paths.preview_path),
+        "--report",
+        str(paths.fbx_report_path),
+    ]
+    print(format_command(blender_command))
+
+
+def run_model_pipeline(
+    output_root: Path,
+    mod_path: Path,
+    model_directory_name: str | None,
+    mfx_path: Path,
+    blender_path: Path,
+    skip_fbx: bool,
+    lod: int,
+) -> dict[str, str | int | None]:
+    model_stem = mod_path.stem
+    artifact_root = (
+        output_root / "models" / model_directory_name
+        if model_directory_name is not None
+        else output_root
     )
+    paths = build_paths(output_root, model_stem, artifact_root=artifact_root)
+
+    run_command(
+        [
+            sys.executable,
+            str(TOOLS_DIR / "gbm_tex_to_png.py"),
+            str(mod_path.parent),
+            "-o",
+            str(paths.png_dir),
+            "--manifest",
+            str(paths.tex_manifest_path),
+        ],
+        dry_run=False,
+    )
+
+    base_texture = choose_texture(paths.png_dir, model_stem, "BM")
+    normal_texture = choose_texture(paths.png_dir, model_stem, "NM")
+    if base_texture is None:
+        raise FileNotFoundError(
+            f"No base-color PNG matching {model_stem}_BM.png found in {paths.png_dir}"
+        )
+
+    obj_command = [
+        sys.executable,
+        str(TOOLS_DIR / "gbm_mod_obj_probe.py"),
+        str(mod_path),
+        "--mfx",
+        str(mfx_path),
+        "-o",
+        str(paths.obj_path),
+        "--texture",
+        str(base_texture),
+        "--position-mode",
+        "bind-pose",
+        "--axis-mode",
+        "engine",
+        "--lod",
+        str(lod),
+        "--manifest",
+        str(paths.obj_manifest_path),
+    ]
+    run_command(obj_command, dry_run=False)
+
+    result: dict[str, str | int | None] = {
+        "model_stem": model_stem,
+        "model_output_root": str(paths.artifact_root),
+        "mod": str(mod_path),
+        "lod": lod,
+        "base_texture": str(base_texture),
+        "normal_texture": str(normal_texture) if normal_texture else None,
+        "obj": str(paths.obj_path),
+        "fbx": None,
+        "preview": None,
+        "report": None,
+    }
+
+    if skip_fbx:
+        return result
+
+    blender_command = [
+        str(blender_path),
+        "--background",
+        "--python",
+        str(TOOLS_DIR / "gbm_blender_convert.py"),
+        "--",
+        "--input-obj",
+        str(paths.obj_path),
+        "--output-fbx",
+        str(paths.fbx_path),
+        "--texture",
+        str(base_texture),
+        "--mod",
+        str(mod_path),
+        "--mfx",
+        str(mfx_path),
+        "--lod",
+        str(lod),
+        "--preview",
+        str(paths.preview_path),
+        "--report",
+        str(paths.fbx_report_path),
+    ]
+    if normal_texture:
+        blender_command.extend(["--normal-texture", str(normal_texture)])
+    run_command(blender_command, dry_run=False)
+    result.update(
+        {
+            "fbx": str(paths.fbx_path),
+            "preview": str(paths.preview_path),
+            "report": str(paths.fbx_report_path),
+        }
+    )
+    return result
 
 
 def main() -> int:
@@ -313,106 +472,54 @@ def main() -> int:
             mfx_path,
             args.blender.resolve(),
             args.skip_fbx,
+            args.lod,
         )
         print(json.dumps({"planned": asdict(paths)}, indent=2, default=str))
         return 0
 
-    manifest = load_manifest(paths.manifest_path)
-    mod_path = choose_mod_path(manifest, paths.extracted_dir, args.model_stem)
-    model_stem = mod_path.stem
-    paths = build_paths(output_root, model_stem)
-
-    run_command(
-        [
-            sys.executable,
-            str(TOOLS_DIR / "gbm_tex_to_png.py"),
-            str(mod_path.parent),
-            "-o",
-            str(paths.png_dir),
-            "--manifest",
-            str(paths.tex_manifest_path),
-        ],
-        args.dry_run,
-    )
-
-    base_texture = choose_texture(paths.png_dir, model_stem, "BM")
-    normal_texture = choose_texture(paths.png_dir, model_stem, "NM")
-    if base_texture is None:
-        raise FileNotFoundError(
-            f"No base-color PNG matching {model_stem}_BM.png found in {paths.png_dir}"
-        )
-
-    obj_command = [
-        sys.executable,
-        str(TOOLS_DIR / "gbm_mod_obj_probe.py"),
-        str(mod_path),
-        "--mfx",
-        str(mfx_path),
-        "-o",
-        str(paths.obj_path),
-        "--texture",
-        str(base_texture),
-        "--position-mode",
-        "bind-pose",
-        "--axis-mode",
-        "blender",
-        "--manifest",
-        str(paths.obj_manifest_path),
-    ]
-    run_command(obj_command, args.dry_run)
-
-    result: dict[str, str | None] = {
-        "arc": str(arc_path),
-        "mfx": str(mfx_path),
-        "mod": str(mod_path),
-        "base_texture": str(base_texture),
-        "normal_texture": str(normal_texture) if normal_texture else None,
-        "obj": str(paths.obj_path),
-        "fbx": None,
-        "preview": None,
-        "report": None,
-    }
-
-    if args.skip_fbx:
-        print(json.dumps(result, indent=2))
-        return 0
-
     blender_path = args.blender.resolve()
-    if not blender_path.exists():
+    if not args.skip_fbx and not blender_path.exists():
         raise FileNotFoundError(
             f"Blender executable not found: {blender_path}. "
             "Use --blender or --skip-fbx."
         )
 
-    blender_command = [
-        str(blender_path),
-        "--background",
-        "--python",
-        str(TOOLS_DIR / "gbm_blender_convert.py"),
-        "--",
-        "--input-obj",
-        str(paths.obj_path),
-        "--output-fbx",
-        str(paths.fbx_path),
-        "--texture",
-        str(base_texture),
-        "--preview",
-        str(paths.preview_path),
-        "--report",
-        str(paths.fbx_report_path),
-    ]
-    if normal_texture:
-        blender_command.extend(["--normal-texture", str(normal_texture)])
-    run_command(blender_command, args.dry_run)
-
-    result.update(
-        {
-            "fbx": str(paths.fbx_path),
-            "preview": str(paths.preview_path),
-            "report": str(paths.fbx_report_path),
-        }
+    manifest = load_manifest(paths.manifest_path)
+    mod_paths = select_mod_paths(manifest, paths.extracted_dir, args.model_stem)
+    model_directory_names = (
+        unique_model_directory_names(mod_paths) if args.model_stem is None else {}
     )
-    print(json.dumps(result, indent=2))
+    results = [
+        run_model_pipeline(
+            output_root=output_root,
+            mod_path=mod_path,
+            model_directory_name=model_directory_names.get(mod_path),
+            mfx_path=mfx_path,
+            blender_path=blender_path,
+            skip_fbx=args.skip_fbx,
+            lod=args.lod,
+        )
+        for mod_path in mod_paths
+    ]
+
+    if len(results) == 1:
+        result = dict(results[0])
+        result.update({"arc": str(arc_path), "mfx": str(mfx_path)})
+        print(json.dumps(result, indent=2))
+        return 0
+
+    print(
+        json.dumps(
+            {
+                "arc": str(arc_path),
+                "mfx": str(mfx_path),
+                "output_root": str(output_root),
+                "model_count": len(results),
+                "models": results,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

@@ -22,14 +22,17 @@ Run from the `GBM-Research` repository root:
 
 ```powershell
 python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  -o .\out\320900 `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
   --force
 ```
 
 Use `--skip-fbx` when Blender is not available. Use `--dry-run` to print the
 planned commands without executing them.
+
+When `--model-stem` is omitted, every discovered `.mod` is exported under
+`out\<arc-stem>\models\<unique-model-name>\...`. If multiple `.mod` files share
+the same stem, later folders receive `__2`, `__3`, and similar suffixes.
 
 ## Manual Pipeline
 
@@ -77,7 +80,7 @@ python .\tools\gbm_mod_obj_probe.py `
   -o .\out\320900\obj `
   --texture .\out\320900\png\ma320900_BM.png `
   --position-mode bind-pose `
-  --axis-mode blender `
+  --axis-mode engine `
   --manifest .\out\320900\obj\ma320900_obj_manifest.json
 ```
 
@@ -98,6 +101,9 @@ Run through Blender 4.2:
 ```
 
 Do not pass `--lmt` for the current static phase.
+
+FBX export keeps the top-level hierarchy flat as `<model>` and optional
+`<model>_armature`; it does not add a helper root empty.
 
 ## Expected Result
 

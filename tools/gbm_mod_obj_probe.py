@@ -225,6 +225,54 @@ def axis_transform(
     raise ValueError(f"unsupported axis mode: {axis_mode}")
 
 
+def is_lod_triplet(records: list[PrimitiveRecord]) -> bool:
+    """Return True when three primitives look like high/medium/low LOD variants."""
+
+    if len(records) != 3:
+        return False
+
+    sorted_records = sorted(records, key=lambda record: record.group_id)
+    group_ids = [record.group_id for record in sorted_records]
+    if group_ids != [1, 2, 3]:
+        return False
+
+    vertex_counts = [record.vertex_count for record in sorted_records]
+    return vertex_counts[0] > vertex_counts[1] > vertex_counts[2]
+
+
+def select_primitives_for_lod(
+    records: list[PrimitiveRecord], lod: int
+) -> list[PrimitiveRecord]:
+    """Keep one LOD variant per material group, or all parts when no LOD chain exists."""
+
+    grouped: dict[int, list[PrimitiveRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.material_table_index, []).append(record)
+
+    selected: list[PrimitiveRecord] = []
+    for material_records in grouped.values():
+        if is_lod_triplet(material_records):
+            target_group_id = lod + 1
+            match = next(
+                (
+                    record
+                    for record in material_records
+                    if record.group_id == target_group_id
+                ),
+                None,
+            )
+            if match is None:
+                material_index = material_records[0].material_table_index
+                raise ValueError(
+                    f"LOD {lod} is unavailable for material {material_index}"
+                )
+            selected.append(match)
+        else:
+            selected.extend(material_records)
+
+    return sorted(selected, key=lambda record: record.index)
+
+
 def decode_position(
     raw_position: tuple[float, float, float],
     header: ModHeader,
@@ -286,10 +334,12 @@ def write_obj_probe(
     position_mode: str,
     axis_mode: str,
     texture_path: Path | None,
+    lod: int = 0,
 ) -> dict:
     data = mod_path.read_bytes()
     header = parse_header(mod_path, data)
-    records = parse_primitive_records(data, header)
+    all_records = parse_primitive_records(data, header)
+    records = select_primitives_for_lod(all_records, lod)
     _, layouts = parse_input_layouts(mfx_path)
     used_layout_ids = sorted(
         {record.resource_hash_or_key & 0xFFF for record in records}
@@ -329,6 +379,7 @@ def write_obj_probe(
         obj.write(f"# mfx: {mfx_path}\n")
         obj.write(f"# position_mode: {position_mode}\n")
         obj.write(f"# axis_mode: {axis_mode}\n")
+        obj.write(f"# lod: {lod}\n")
         if mtl_path:
             obj.write(f"mtllib {mtl_path.name}\n")
             obj.write("usemtl gbm_material\n")
@@ -362,7 +413,8 @@ def write_obj_probe(
                     position_mode,
                 )
                 position = axis_transform(engine_position, axis_mode)
-                uv = decode_element(vertex_bytes, uv_element)[:2]
+                raw_uv = decode_element(vertex_bytes, uv_element)[:2]
+                uv = (raw_uv[0], 1.0 - raw_uv[1])
                 engine_normal = decode_element(vertex_bytes, normal_element)[:3]
                 normal = axis_transform(engine_normal, axis_mode)
                 normal_length = math.sqrt(sum(component * component for component in normal))
@@ -410,6 +462,10 @@ def write_obj_probe(
         "texture": str(texture_path) if texture_path else None,
         "position_mode": position_mode,
         "axis_mode": axis_mode,
+        "lod": lod,
+        "primitive_count_total": len(all_records),
+        "primitive_count_exported": len(records),
+        "exported_primitive_indices": [record.index for record in records],
         "export_scope": "static bind-pose mesh; skeleton/weights are not represented by OBJ",
         "header": asdict(header),
         "used_input_layouts": used_layouts,
@@ -477,8 +533,22 @@ def main() -> int:
     )
     parser.add_argument(
         "--axis-mode",
-        choices=("blender", "engine"),
-        default="blender",
+        choices=("engine", "blender"),
+        default="engine",
+        help=(
+            "Coordinate basis for OBJ output. engine keeps native MOD coordinates "
+            "(rotate=0). blender applies the legacy Blender axis remap."
+        ),
+    )
+    parser.add_argument(
+        "--lod",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help=(
+            "LOD level for equip-style MOD files. 0 is highest detail. "
+            "When a material has no LOD chain, all of its primitives are exported."
+        ),
     )
     args = parser.parse_args()
     obj_path = resolve_obj_output_path(args.mod, args.output)
@@ -491,12 +561,14 @@ def main() -> int:
         args.position_mode,
         args.axis_mode,
         args.texture,
+        args.lod,
     )
     print(
-        "wrote {obj} ({vertices} vertices, {faces} faces, mode={mode})".format(
+        "wrote {obj} ({vertices} vertices, {faces} faces, lod={lod}, mode={mode})".format(
             obj=obj_path,
             vertices=manifest["vertices"],
             faces=manifest["faces"],
+            lod=manifest["lod"],
             mode=args.position_mode,
         )
     )

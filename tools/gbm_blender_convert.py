@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import shutil
 import sys
 from collections import Counter
@@ -24,14 +23,15 @@ TOOLS_DIRECTORY = Path(__file__).resolve().parent
 if str(TOOLS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIRECTORY))
 
-from gbm_mfx_inspect import parse_input_layouts
-from gbm_lmt_inspect import decode_motion_tracks, sample_track
-from gbm_mod_inspect import parse_header, parse_primitive_records
-from gbm_mod_obj_probe import (
+from gbm_mfx_inspect import parse_input_layouts  # noqa: E402
+from gbm_lmt_inspect import decode_motion_tracks, sample_track  # noqa: E402
+from gbm_mod_inspect import parse_header, parse_primitive_records  # noqa: E402
+from gbm_mod_obj_probe import (  # noqa: E402
     derive_bind_decode_matrix,
     matrix_from_bytes,
     multiply_matrix,
     parse_bone_palettes,
+    select_primitives_for_lod,
 )
 
 
@@ -50,7 +50,67 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview", type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--scale", type=float, default=0.01)
+    parser.add_argument(
+        "--lod",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help=(
+            "LOD level used when reading skin weights from --mod. "
+            "Must match the LOD used for --input-obj."
+        ),
+    )
+    parser.add_argument(
+        "--axis-mode",
+        choices=("engine", "blender"),
+        help=(
+            "Coordinate system for bone bind matrices. Defaults to the "
+            "# axis_mode: value written by gbm_mod_obj_probe.py."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def read_obj_header_metadata(path: Path) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines()[:16]:
+        if not line.startswith("# "):
+            break
+        if ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        metadata[key.strip()] = value.strip()
+    return metadata
+
+
+def resolve_axis_mode(path: Path, requested: str | None) -> str:
+    if requested:
+        return requested
+    metadata = read_obj_header_metadata(path)
+    axis_mode = metadata.get("axis_mode", "engine")
+    if axis_mode not in {"engine", "blender"}:
+        raise ValueError(f"unsupported axis_mode in OBJ header: {axis_mode!r}")
+    return axis_mode
+
+
+def engine_to_blender_axis_matrix() -> Matrix:
+    return Matrix(
+        (
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0, 0.0),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+    )
+
+
+def convert_bind_matrix(matrix: Matrix, axis_mode: str, scale: float) -> Matrix:
+    converted = matrix.copy()
+    if axis_mode == "blender":
+        axis_matrix = engine_to_blender_axis_matrix()
+        converted = axis_matrix @ converted @ axis_matrix.inverted()
+    converted.translation *= scale
+    return converted
 
 
 def clear_scene() -> None:
@@ -75,14 +135,14 @@ def import_obj(path: Path) -> list[bpy.types.Object]:
     if hasattr(bpy.ops.wm, "obj_import"):
         bpy.ops.wm.obj_import(
             filepath=str(path),
-            forward_axis="NEGATIVE_Y",
-            up_axis="Z",
+            forward_axis="Z",
+            up_axis="Y",
         )
     else:
         bpy.ops.import_scene.obj(
             filepath=str(path),
-            axis_forward="-Y",
-            axis_up="Z",
+            axis_forward="Z",
+            axis_up="Y",
         )
     return [
         obj
@@ -91,7 +151,9 @@ def import_obj(path: Path) -> list[bpy.types.Object]:
     ]
 
 
-def join_meshes(objects: list[bpy.types.Object]) -> bpy.types.Object:
+def join_meshes(
+    objects: list[bpy.types.Object], model_stem: str
+) -> bpy.types.Object:
     if not objects:
         raise RuntimeError("OBJ import produced no mesh objects")
     bpy.ops.object.select_all(action="DESELECT")
@@ -101,9 +163,16 @@ def join_meshes(objects: list[bpy.types.Object]) -> bpy.types.Object:
     if len(objects) > 1:
         bpy.ops.object.join()
     model = bpy.context.view_layer.objects.active
-    model.name = "ma320900"
-    model.data.name = "ma320900_mesh"
+    model.name = model_stem
+    model.data.name = f"{model_stem}_mesh"
     return model
+
+
+def apply_import_rotation(model: bpy.types.Object) -> None:
+    """Bake OBJ importer axis correction into mesh data for engine-space OBJ files."""
+    bpy.context.view_layer.objects.active = model
+    model.select_set(True)
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
 
 def apply_scale(model: bpy.types.Object, scale: float) -> None:
@@ -187,10 +256,12 @@ def find_layout_element(layout: object, semantic: str) -> object | None:
 def read_skin_weights(
     mod_path: Path,
     mfx_path: Path,
+    lod: int = 0,
 ) -> tuple[list[list[tuple[int, float]]], dict[str, object], list[int], list[Matrix]]:
     data = mod_path.read_bytes()
     header = parse_header(mod_path, data)
-    records = parse_primitive_records(data, header)
+    all_records = parse_primitive_records(data, header)
+    records = select_primitives_for_lod(all_records, lod)
     _, layouts = parse_input_layouts(mfx_path)
     palettes = parse_bone_palettes(data, header)
     _, matrix_delta, parents = derive_bind_decode_matrix(data, header)
@@ -303,6 +374,10 @@ def read_skin_weights(
     report = {
         "mod": str(mod_path),
         "mfx": str(mfx_path),
+        "lod": lod,
+        "primitive_count_total": len(all_records),
+        "primitive_count_used": len(records),
+        "exported_primitive_indices": [record.index for record in records],
         "bone_count": header.bone_count,
         "vertex_count": len(vertex_weights),
         "layout_vertices": dict(sorted(layout_vertices.items())),
@@ -329,9 +404,11 @@ def build_armature(
     mod_path: Path,
     mfx_path: Path,
     scale: float,
+    lod: int = 0,
+    axis_mode: str = "engine",
 ) -> tuple[bpy.types.Object, dict[str, object]]:
     vertex_weights, report, parents, source_world_matrices = read_skin_weights(
-        mod_path, mfx_path
+        mod_path, mfx_path, lod
     )
     if len(vertex_weights) != len(model.data.vertices):
         raise ValueError(
@@ -339,20 +416,10 @@ def build_armature(
             f"{len(model.data.vertices)}"
         )
 
-    axis_matrix = Matrix(
-        (
-            (1.0, 0.0, 0.0, 0.0),
-            (0.0, 0.0, -1.0, 0.0),
-            (0.0, 1.0, 0.0, 0.0),
-            (0.0, 0.0, 0.0, 1.0),
-        )
-    )
-    axis_inverse = axis_matrix.inverted()
-    bone_matrices: list[Matrix] = []
-    for source_matrix in source_world_matrices:
-        converted = axis_matrix @ source_matrix @ axis_inverse
-        converted.translation *= scale
-        bone_matrices.append(converted)
+    bone_matrices = [
+        convert_bind_matrix(source_matrix, axis_mode, scale)
+        for source_matrix in source_world_matrices
+    ]
 
     armature_data = bpy.data.armatures.new(f"{model.name}_armature")
     armature = bpy.data.objects.new(f"{model.name}_armature", armature_data)
@@ -361,11 +428,12 @@ def build_armature(
     armature.select_set(True)
     bpy.ops.object.mode_set(mode="EDIT")
 
-    edit_bones = []
+    bone_length = max(scale * 10.0, 0.05)
+    edit_bones: list[bpy.types.EditBone] = []
     for bone_index, matrix in enumerate(bone_matrices):
         edit_bone = armature_data.edit_bones.new(f"Bone_{bone_index:03d}")
         edit_bone.matrix = matrix
-        edit_bone.length = max(scale * 10.0, 0.05)
+        edit_bone.length = bone_length
         edit_bones.append(edit_bone)
     for bone_index, parent in enumerate(parents):
         if parent != 0xFF:
@@ -390,11 +458,12 @@ def build_armature(
     report.update(
         {
             "armature": armature.name,
+            "axis_mode": axis_mode,
             "root_bones": sum(parent == 0xFF for parent in parents),
             "vertex_groups": len(model.vertex_groups),
             "rest_pose_status": (
-                "Hierarchy and source bind matrices imported; orientation remains "
-                "experimental until validated against LMT animation."
+                "Bind matrices imported from MOD without extra axis rotation "
+                f"when axis_mode is {axis_mode!r}."
             ),
         }
     )
@@ -407,6 +476,7 @@ def apply_lmt_motion(
     lmt_path: Path,
     motion_index: int,
     scale: float,
+    axis_mode: str = "engine",
 ) -> dict[str, object]:
     mod_data = mod_path.read_bytes()
     header = parse_header(mod_path, mod_data)
@@ -474,15 +544,12 @@ def apply_lmt_motion(
             f"motion {motion_index} has unmapped joint tracks {unresolved_tracks}"
         )
 
-    axis_matrix = Matrix(
-        (
-            (1.0, 0.0, 0.0, 0.0),
-            (0.0, 0.0, -1.0, 0.0),
-            (0.0, 1.0, 0.0, 0.0),
-            (0.0, 0.0, 0.0, 1.0),
-        )
+    axis_matrix = (
+        engine_to_blender_axis_matrix()
+        if axis_mode == "blender"
+        else None
     )
-    axis_inverse = axis_matrix.inverted()
+    axis_inverse = axis_matrix.inverted() if axis_matrix is not None else None
     action = bpy.data.actions.new(
         name=f"{armature.name}_motion_{motion_index:02d}"
     )
@@ -562,7 +629,10 @@ def apply_lmt_motion(
         )
         scene.frame_set(blender_frame)
         for bone_index, target_world in enumerate(target_world_matrices):
-            converted = axis_matrix @ (root_motion @ target_world) @ axis_inverse
+            converted = root_motion @ target_world
+            if axis_matrix is not None and axis_inverse is not None:
+                converted = axis_matrix @ converted @ axis_inverse
+            converted = converted.copy()
             converted.translation *= scale
             pose_bone = armature.pose.bones[f"Bone_{bone_index:03d}"]
             pose_bone.rotation_mode = "QUATERNION"
@@ -734,6 +804,11 @@ def mesh_stats(objects: list[bpy.types.Object]) -> dict[str, object]:
 def scene_stats(objects: list[bpy.types.Object]) -> dict[str, object]:
     stats = mesh_stats(objects)
     armatures = [obj for obj in objects if obj.type == "ARMATURE"]
+    helper_root_empties = sorted(
+        obj.name
+        for obj in objects
+        if obj.type == "EMPTY" and obj.name.endswith("_export_root")
+    )
     meshes = [obj for obj in objects if obj.type == "MESH"]
     stats.update(
         {
@@ -759,6 +834,7 @@ def scene_stats(objects: list[bpy.types.Object]) -> dict[str, object]:
                     if obj.animation_data and obj.animation_data.action
                 }
             ),
+            "helper_root_empties": helper_root_empties,
         }
     )
     return stats
@@ -778,16 +854,21 @@ def export_fbx(
         use_selection=True,
         object_types={"MESH", "ARMATURE"},
         apply_unit_scale=True,
+        use_space_transform=True,
         bake_space_transform=False,
         mesh_smooth_type="FACE",
         use_mesh_modifiers=True,
         add_leaf_bones=False,
+        primary_bone_axis="-X",
+        secondary_bone_axis="Y",
         use_armature_deform_only=False,
         bake_anim=bake_animation,
         bake_anim_use_all_actions=False,
         bake_anim_use_nla_strips=False,
         path_mode="RELATIVE",
         embed_textures=False,
+        axis_forward="Z",
+        axis_up="Y",
     )
 
 
@@ -799,7 +880,7 @@ def verify_fbx(path: Path, frame: int) -> dict[str, object]:
     imported = [
         obj
         for obj in bpy.context.scene.objects
-        if obj.type in {"MESH", "ARMATURE"}
+        if obj.type in {"EMPTY", "MESH", "ARMATURE"}
     ]
     return scene_stats(imported)
 
@@ -816,8 +897,12 @@ def main() -> None:
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
 
+    axis_mode = resolve_axis_mode(input_obj, args.axis_mode)
+
     clear_scene()
-    model = join_meshes(import_obj(input_obj))
+    model = join_meshes(import_obj(input_obj), input_obj.stem)
+    if axis_mode == "engine":
+        apply_import_rotation(model)
     apply_scale(model, args.scale)
     material, image_paths = build_material(
         output_fbx.parent,
@@ -842,6 +927,8 @@ def main() -> None:
             args.mod.resolve(),
             args.mfx.resolve(),
             args.scale,
+            args.lod,
+            axis_mode,
         )
         export_objects.append(armature)
         if args.lmt:
@@ -851,6 +938,7 @@ def main() -> None:
                 args.lmt.resolve(),
                 args.motion_index,
                 args.scale,
+                axis_mode,
             )
     validation_frame = args.preview_frame if args.preview_frame is not None else 1
     if validation_frame < 1:
@@ -877,8 +965,18 @@ def main() -> None:
         "input_obj": str(input_obj),
         "output_fbx": str(output_fbx),
         "fbx_size": output_fbx.stat().st_size,
+        "lod": args.lod,
+        "axis_mode": axis_mode,
         "scale": args.scale,
         "validation_frame": validation_frame,
+        "fbx_export_settings": {
+            "use_space_transform": True,
+            "bake_space_transform": False,
+            "axis_forward": "Z",
+            "axis_up": "Y",
+            "primary_bone_axis": "-X",
+            "secondary_bone_axis": "Y",
+        },
         "image_paths": image_paths,
         "preview": str(preview) if preview else None,
         "skin": skin_report,
