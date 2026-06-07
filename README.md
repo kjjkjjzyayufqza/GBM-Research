@@ -13,7 +13,7 @@ Android resources.
 
 ## What This Project Does
 
-The current milestone is a reproducible static extraction pipeline:
+Reproducible static extraction pipeline:
 
 ```text
 GBM DLC .arc
@@ -23,20 +23,246 @@ GBM DLC .arc
   -> OBJ plus PNG textures converted to static FBX with Blender
 ```
 
-The validated sample path is `ch/320900.arc`, which produces a textured static
-model with:
+The validated sample path is `ch/320900.arc` (1 mesh, 52,667 vertices, 44,867
+polygons). Animation research is deferred; LMT notes are retained as context only.
 
-| Metric | Validated value |
-|---|---:|
-| Meshes | 1 |
-| Vertices | 52,667 |
-| Polygons | 44,867 |
-| Loops | 134,601 |
-| Material | practical BM/NM Blender material |
+## Table of Contents
 
-Animation research is currently deferred. LMT notes are retained as reverse
-engineering context, but LMT-to-FBX animation is not part of the stable static
-pipeline.
+**Getting started**
+
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [One-Command Tool: `gbm_start.py`](#one-command-tool-gbm_startpy)
+- [Manual Stage Commands](#manual-stage-commands)
+- [Individual Tool Summary](#individual-tool-summary)
+
+**Reference**
+
+- [Repository Layout](#repository-layout)
+- [High-Level Game Resource Architecture](#high-level-game-resource-architecture)
+- [Extraction Pipeline Architecture](#extraction-pipeline-architecture)
+- [Orientation Notes](#orientation-notes)
+- [Format Notes](#format-notes)
+- [Validation Strategy](#validation-strategy)
+- [Legal and Asset Handling](#legal-and-asset-handling)
+- [License](#license)
+
+---
+
+## Requirements
+
+Python:
+
+```powershell
+python --version
+python -m pip install pycryptodome pillow texture2ddecoder
+```
+
+Blender is required for FBX export and preview rendering. Blender 4.2 was used
+for validation:
+
+```text
+C:\Program Files\Blender Foundation\Blender 4.2\blender.exe
+```
+
+The Python tools can still produce extracted resources, PNGs, and OBJ files
+without Blender by passing `--skip-fbx` to `gbm_start.py`.
+
+The static model decoder also needs `ShaderPackage.mfx`. `gbm_start.py` uses
+`tools/ShaderPackage.mfx` by default. If that file is missing, copy it from the
+extracted APK or pass `--mfx <path>` explicitly.
+
+Input is a local GBM `.arc` archive (for example `ch/12235.arc`). This
+repository does not include game archives.
+
+Generated output should go under `out/`, which is ignored by Git.
+
+## Quick Start
+
+Run from the repository root:
+
+```powershell
+cd E:\research\Gundam_Breaker_Mobile\GBM-Research
+```
+
+**One-command static extraction:**
+
+```powershell
+python .\tools\gbm_start.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235
+```
+
+You usually only know the `.arc` filename (for example `12235.arc` or
+`320900.arc`), not the internal model stems inside it (for example `chr122350` or
+`ma320900`). Do not pass `--model-stem` unless you already know the exact stem
+from a prior run or from `extracted/_manifest.json`.
+
+By default, `gbm_start.py` exports every discovered `.mod` under
+`out/<arc-stem>/models/<unique-model-name>/...`.
+
+Expected output layout:
+
+```text
+out/12235/
+  extracted/
+    _manifest.json
+    ...
+  models/
+    chr122350/
+      png/
+        _tex_manifest.json
+        chr122350_BM.png
+        chr122350_NM.png
+      obj/
+        chr122350.obj
+        chr122350.mtl
+        chr122350_obj_manifest.json
+      fbx/
+        chr122350.fbx
+        chr122350_BM.png
+        chr122350_NM.png
+        chr122350_preview.png
+        chr122350_fbx_report.json
+    chr122351/
+      ...
+```
+
+If multiple `.mod` files share the same stem, later folders are suffixed as
+`__2`, `__3`, and so on.
+
+**Preview without writing files:**
+
+```powershell
+python .\tools\gbm_start.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
+  --dry-run
+```
+
+**Stop before FBX export (no Blender needed):**
+
+```powershell
+python .\tools\gbm_start.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
+  --skip-fbx
+```
+
+**Custom Blender executable:**
+
+```powershell
+python .\tools\gbm_start.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
+  -o .\out\12235 `
+  --blender 'D:\Tools\Blender\blender.exe'
+```
+
+**Find archives by unit name** (e.g. `RX-78-2`): see
+[RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) or start with
+`tools/gbm_archive_lookup_index.csv`.
+
+---
+
+## One-Command Tool: `gbm_start.py`
+
+`gbm_start.py` is the recommended entry point. It orchestrates the focused tools
+in sequence without duplicating format logic.
+
+```text
+gbm_start.py
+  1. calls gbm_arc_extract.py
+  2. reads the extraction manifest
+  3. exports every discovered MOD (or one MOD when `--model-stem` is provided)
+  4. calls gbm_tex_to_png.py on the MOD directory
+  5. calls gbm_mod_obj_probe.py
+  6. optionally calls Blender with gbm_blender_convert.py
+```
+
+Options:
+
+| Option | Required | Meaning |
+|---|---:|---|
+| `arc` | yes | Input GBM `.arc` archive |
+| `--mfx` | no | Override `ShaderPackage.mfx`; defaults to `tools/ShaderPackage.mfx` |
+| `-o`, `--output` | no | Output root; defaults to `out/<arc-stem>` |
+| `--model-stem` | no | Optional. Restrict export to one known model stem. Omit this in normal use: you usually only have the `.arc` name, not internal stems like `ma320900`. Check `extracted/_manifest.json` after the first run if you need the exact names |
+| `--limit` | no | Extract only the first N archive entries |
+| `--blender` | no | Blender executable path |
+| `--skip-fbx` | no | Stop after PNG and OBJ output |
+| `--dry-run` | no | Print planned commands and paths |
+
+## Manual Stage Commands
+
+Use these when investigating a failure in one stage. The examples below use
+`ma320900` paths from the validated `320900.arc` sample; after your own
+extraction, read `extracted/_manifest.json` to find the real model paths inside
+that archive.
+
+### 1. Extract ARCC
+
+```powershell
+python .\tools\gbm_arc_extract.py `
+  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
+  -o .\out\320900\extracted `
+  --manifest .\out\320900\extracted\_manifest.json
+```
+
+### 2. Convert TEX to PNG
+
+```powershell
+python .\tools\gbm_tex_to_png.py `
+  .\out\320900\extracted\character\ma320900\mod `
+  -o .\out\320900\png `
+  --manifest .\out\320900\png\_tex_manifest.json
+```
+
+### 3. Export OBJ
+
+```powershell
+python .\tools\gbm_mod_obj_probe.py `
+  .\out\320900\extracted\character\ma320900\mod\ma320900.mod `
+  -o .\out\320900\obj `
+  --texture .\out\320900\png\ma320900_BM.png `
+  --position-mode bind-pose `
+  --axis-mode engine `
+  --manifest .\out\320900\obj\ma320900_obj_manifest.json
+```
+
+### 4. Export FBX
+
+```powershell
+& 'C:\Program Files\Blender Foundation\Blender 4.2\blender.exe' `
+  --background `
+  --python .\tools\gbm_blender_convert.py -- `
+  --input-obj .\out\320900\obj\ma320900.obj `
+  --output-fbx .\out\320900\fbx\ma320900.fbx `
+  --texture .\out\320900\png\ma320900_BM.png `
+  --normal-texture .\out\320900\png\ma320900_NM.png `
+  --preview .\out\320900\fbx\ma320900_preview.png `
+  --report .\out\320900\fbx\ma320900_fbx_report.json
+```
+
+Do not pass `--lmt`, `--motion-index`, or `--preview-frame` for the current
+static extraction milestone.
+
+## Individual Tool Summary
+
+| Tool | Purpose | Main output |
+|---|---|---|
+| `tools/gbm_start.py` | Orchestrates the stable static pipeline | output directory tree |
+| `tools/gbm_arc_extract.py` | Decrypts/decompresses ARCC v8 archives | extracted native resources |
+| `tools/gbm_tex_to_png.py` | Converts TEX v10 textures | PNG files |
+| `tools/gbm_mod_obj_probe.py` | Exports MOD v7 bind-pose geometry | OBJ, MTL, manifest |
+| `tools/gbm_blender_convert.py` | Converts OBJ/PNG to static FBX in Blender | FBX, preview, report |
+| `tools/gbm_mod_inspect.py` | Inspects MOD structure | JSON report |
+| `tools/gbm_mfx_inspect.py` | Inspects MFX input layouts | JSON report |
+| `tools/gbm_lmt_inspect.py` | Inspects deferred LMT motion files | JSON report |
+| `tools/gbm_equip_lookup.py` | Looks up serial names such as `RX-78-2` | `model_id` and matching `ch/*.arc` variants |
+
+Detailed tool notes live in [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md).
+
+---
 
 ## Repository Layout
 
@@ -73,14 +299,6 @@ GBM-Research/
   GBM_ARC_RESEARCH.md
 ```
 
-Expected local game-data directories live outside this repository:
-
-```text
-../com.bandainamcoent.gb_jp/
-../gundam-breaker-mobile-4-01-03/
-```
-
-Generated output should go under `out/`, which is ignored by Git.
 `tools/ShaderPackage.mfx` is the default shader package used for MOD vertex
 layout decoding.
 
@@ -160,218 +378,7 @@ flowchart TD
     N -. orchestrates .-> J
 ```
 
-The recommended user-facing entry point is `tools/gbm_start.py`. The lower-level
-tools remain available for debugging each stage.
-
-## Requirements
-
-Python:
-
-```powershell
-python --version
-python -m pip install pycryptodome pillow texture2ddecoder
-```
-
-Blender is required for FBX export and preview rendering. Blender 4.2 was used
-for validation:
-
-```text
-C:\Program Files\Blender Foundation\Blender 4.2\blender.exe
-```
-
-The Python tools can still produce extracted resources, PNGs, and OBJ files
-without Blender by passing `--skip-fbx` to `gbm_start.py`.
-
-The static model decoder also needs `ShaderPackage.mfx`. `gbm_start.py` uses
-`tools/ShaderPackage.mfx` by default. If that file is missing, copy it from the
-extracted APK or pass `--mfx <path>` explicitly.
-
-## Quick Start
-
-Run from the repository root:
-
-```powershell
-cd E:\research\Gundam_Breaker_Mobile\GBM-Research
-```
-
-One-command static extraction for all discovered models in one archive:
-
-```powershell
-python .\tools\gbm_start.py `
-  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
-  -o .\out\12235 `
-  --force
-```
-
-When `--model-stem` is omitted, `gbm_start.py` exports every discovered `.mod`
-under `out/<arc-stem>/models/<unique-model-name>/...`.
-
-Expected output layout:
-
-```text
-out/12235/
-  extracted/
-    _manifest.json
-    ...
-  models/
-    chr122350/
-      png/
-        _tex_manifest.json
-        chr122350_BM.png
-        chr122350_NM.png
-      obj/
-        chr122350.obj
-        chr122350.mtl
-        chr122350_obj_manifest.json
-      fbx/
-        chr122350.fbx
-        chr122350_BM.png
-        chr122350_NM.png
-        chr122350_preview.png
-        chr122350_fbx_report.json
-    chr122351/
-      ...
-```
-
-If multiple `.mod` files share the same stem, later folders are suffixed as
-`__2`, `__3`, and so on.
-
-Single-model export remains available:
-
-```powershell
-python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  -o .\out\320900 `
-  --force
-```
-
-Preview commands without writing files:
-
-```powershell
-python .\tools\gbm_start.py `
-  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
-  -o .\out\12235 `
-  --dry-run
-```
-
-Stop before FBX export:
-
-```powershell
-python .\tools\gbm_start.py `
-  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
-  -o .\out\12235 `
-  --skip-fbx
-```
-
-Use a custom Blender executable:
-
-```powershell
-python .\tools\gbm_start.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  --model-stem ma320900 `
-  --blender 'D:\Tools\Blender\blender.exe' `
-  -o .\out\320900
-```
-
-## One-Command Tool: `gbm_start.py`
-
-`gbm_start.py` is a thin orchestrator. It does not duplicate format logic; it
-calls the focused tools in sequence.
-
-```text
-gbm_start.py
-  1. calls gbm_arc_extract.py
-  2. reads the extraction manifest
-  3. selects one MOD when `--model-stem` is provided, otherwise exports every discovered MOD
-  4. calls gbm_tex_to_png.py on the MOD directory
-  5. calls gbm_mod_obj_probe.py
-  6. optionally calls Blender with gbm_blender_convert.py
-```
-
-Options:
-
-| Option | Required | Meaning |
-|---|---:|---|
-| `arc` | yes | Input GBM `.arc` archive |
-| `--mfx` | no | Override `ShaderPackage.mfx`; defaults to `tools/ShaderPackage.mfx` |
-| `-o`, `--output` | no | Output root; defaults to `out/<arc-stem>` |
-| `--model-stem` | no | Restrict export to one model stem such as `ma320900`; when omitted, export every discovered `.mod` under `models/<unique-model-name>` |
-| `--limit` | no | Extract only the first N archive entries |
-| `--blender` | no | Blender executable path |
-| `--skip-fbx` | no | Stop after PNG and OBJ output |
-| `--force` | no | Delete the selected output root before running |
-| `--dry-run` | no | Print planned commands and paths |
-
-`--force` only deletes inside the current repository. It refuses to delete the
-repository root or paths outside the repository.
-
-## Manual Stage Commands
-
-Use these when investigating a failure in one stage.
-
-### 1. Extract ARCC
-
-```powershell
-python .\tools\gbm_arc_extract.py `
-  ..\com.bandainamcoent.gb_jp\files\dlc\archive\ch\320900.arc `
-  -o .\out\320900\extracted `
-  --manifest .\out\320900\extracted\_manifest.json
-```
-
-### 2. Convert TEX to PNG
-
-```powershell
-python .\tools\gbm_tex_to_png.py `
-  .\out\320900\extracted\character\ma320900\mod `
-  -o .\out\320900\png `
-  --manifest .\out\320900\png\_tex_manifest.json
-```
-
-### 3. Export OBJ
-
-```powershell
-python .\tools\gbm_mod_obj_probe.py `
-  .\out\320900\extracted\character\ma320900\mod\ma320900.mod `
-  -o .\out\320900\obj `
-  --texture .\out\320900\png\ma320900_BM.png `
-  --position-mode bind-pose `
-  --axis-mode engine `
-  --manifest .\out\320900\obj\ma320900_obj_manifest.json
-```
-
-### 4. Export FBX
-
-```powershell
-& 'C:\Program Files\Blender Foundation\Blender 4.2\blender.exe' `
-  --background `
-  --python .\tools\gbm_blender_convert.py -- `
-  --input-obj .\out\320900\obj\ma320900.obj `
-  --output-fbx .\out\320900\fbx\ma320900.fbx `
-  --texture .\out\320900\png\ma320900_BM.png `
-  --normal-texture .\out\320900\png\ma320900_NM.png `
-  --preview .\out\320900\fbx\ma320900_preview.png `
-  --report .\out\320900\fbx\ma320900_fbx_report.json
-```
-
-Do not pass `--lmt`, `--motion-index`, or `--preview-frame` for the current
-static extraction milestone.
-
-## Individual Tool Summary
-
-| Tool | Purpose | Main output |
-|---|---|---|
-| `tools/gbm_start.py` | Orchestrates the stable static pipeline | output directory tree |
-| `tools/gbm_arc_extract.py` | Decrypts/decompresses ARCC v8 archives | extracted native resources |
-| `tools/gbm_tex_to_png.py` | Converts TEX v10 textures | PNG files |
-| `tools/gbm_mod_obj_probe.py` | Exports MOD v7 bind-pose geometry | OBJ, MTL, manifest |
-| `tools/gbm_blender_convert.py` | Converts OBJ/PNG to static FBX in Blender | FBX, preview, report |
-| `tools/gbm_mod_inspect.py` | Inspects MOD structure | JSON report |
-| `tools/gbm_mfx_inspect.py` | Inspects MFX input layouts | JSON report |
-| `tools/gbm_lmt_inspect.py` | Inspects deferred LMT motion files | JSON report |
-| `tools/gbm_equip_lookup.py` | Looks up serial names such as `RX-78-2` | `model_id` and matching `ch/*.arc` variants |
-
-Detailed tool notes live in [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md).
+The lower-level tools remain available for debugging each stage.
 
 ## Orientation Notes
 
