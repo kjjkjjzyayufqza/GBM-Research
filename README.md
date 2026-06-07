@@ -386,9 +386,14 @@ Detailed tool notes live in [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md).
 - FBX export now keeps the top-level hierarchy flat as `<model>` plus
   `<model>_armature`; it no longer inserts a helper empty such as
   `<model>_export_root`.
-- Bone rest orientation is driven directly from the imported bind matrices. If
-  a Maya import still shows the root bone facing the wrong direction, validate
-  the bone transform itself rather than a helper parent node.
+- The current Blender FBX export preset is `Use Space Transform = True`,
+  `Bake Space Transform = False`, `Forward = Z`, `Up = Y`,
+  `Primary Bone Axis = -X`, and `Secondary Bone Axis = Y`.
+- These FBX export settings are written into `*_fbx_report.json` as
+  `fbx_export_settings` so Maya-facing orientation changes stay auditable.
+- Bone rest orientation is still driven directly from the imported bind
+  matrices. The exporter does not add a helper root or inject a fixed
+  `Bone_000` rest rotation on top of the decoded MOD bind pose.
 
 ## Format Notes
 
@@ -436,6 +441,7 @@ The report records:
 
 - input OBJ path;
 - output FBX path;
+- FBX exporter transform and bone-axis settings;
 - copied texture paths;
 - source scene topology;
 - re-imported FBX topology;
