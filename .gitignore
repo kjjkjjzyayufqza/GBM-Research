@@ -1,0 +1,32 @@
+# Generated extraction and conversion outputs
+out/
+outputs/
+research_output/
+research-out/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Large/raw game data should stay outside this research repo
+*.arc
+*.apk
+*.7z
+*.zip
+*.tex
+*.mod
+*.mrl
+*.lmt
+*.fbx
+*.obj
+*.mtl
+*.png
+*.dds
+*.ogg
+*.sew
+
+# Local editor and OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
