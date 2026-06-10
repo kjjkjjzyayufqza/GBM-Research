@@ -13,6 +13,10 @@ SPEC.loader.exec_module(gbm_start)
 
 
 class SelectModPathsTests(unittest.TestCase):
+    def test_entry_output_paths_returns_empty_list_without_entries(self) -> None:
+        self.assertEqual(gbm_start.entry_output_paths({}), [])
+        self.assertEqual(gbm_start.entry_output_paths({"entries": "bad"}), [])
+
     def test_without_model_stem_returns_all_sorted_mods(self) -> None:
         extracted_dir = Path("E:/tmp/out/extracted")
         manifest = {

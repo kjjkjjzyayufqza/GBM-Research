@@ -13,6 +13,23 @@ SPEC.loader.exec_module(gbm_batch)
 
 
 class BatchOutputPathTests(unittest.TestCase):
+    def test_single_input_default_output_uses_input_stem(self) -> None:
+        input_paths = [Path("E:/game/archive/ch/320900.arc")]
+
+        actual = gbm_batch.resolve_output_root(input_paths, None)
+
+        self.assertEqual(actual, gbm_batch.DEFAULT_OUTPUT_ROOT / "320900")
+
+    def test_multiple_inputs_default_output_uses_shared_batch_root(self) -> None:
+        input_paths = [
+            Path("E:/game/archive/ch/320900.arc"),
+            Path("E:/game/archive/ch/320901.arc"),
+        ]
+
+        actual = gbm_batch.resolve_output_root(input_paths, None)
+
+        self.assertEqual(actual, gbm_batch.DEFAULT_OUTPUT_ROOT)
+
     def test_directory_input_preserves_relative_folder_and_arc_stem(self) -> None:
         input_root = Path("E:/game/archive/ma")
         output_root = Path("E:/out/ma_batch")

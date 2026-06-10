@@ -51,16 +51,19 @@ tools/gbm_archive_lookup_index.csv
 tools/gbm_equip_parts_index.csv
 ```
 
-`gbm_archive_lookup_index.csv` is the human-readable first stop. It has one row
-per `serial_name + gunpla_id + model_id` and keeps the common lookup fields:
+`gbm_archive_lookup_index.csv` is the human-readable first stop for mobile suit
+body resources. It is generated from the head/body/arms/legs/backpack equip
+tables only, so weapon and shield model archives do not get folded into a
+unit's body archive list. It has one row per `serial_name + gunpla_id +
+model_id` and keeps the common lookup fields:
 
 ```text
 serial_name, gunpla_id, model_id, part_types, parts_count,
 primary_ch_archive, has_ch_archive, ch_archives, source_tables
 ```
 
-`gbm_equip_parts_index.csv` is the full part-level index. It has one row per
-detected equip table part record:
+`gbm_equip_parts_index.csv` is the matching body-part-level index. It has one
+row per detected head/body/arms/legs/backpack equip table part record:
 
 ```text
 serial_name, gunpla_id, model_id, part_type, parts_id, parts_name_id,
@@ -78,6 +81,15 @@ body-table unit fall back to their source table order.
 
 The Python lookup tool remains useful when regenerating or filtering from the
 raw APK tables, but the CSVs above should be read first.
+
+Regenerate the CSVs with:
+
+```powershell
+python .\tools\gbm_equip_lookup.py --write-indexes
+```
+
+Pass `--include-non-suit-parts` only when you intentionally want weapon and
+shield rows included in the generated indexes.
 
 Use:
 
@@ -114,14 +126,8 @@ The base RX-78-2 body parts map to `model_id = 10000`:
 | Part group | `model_id` | Current archive variants |
 |---|---:|---|
 | Head, body, arms, legs, backpack | `10000` | `ch/10000.arc`, `ch/10000_vfx.arc` |
-| Long weapons | `10100` | `ch/10100.arc`, `ch/10100_vfx.arc` |
-| Long weapons | `10600` | `ch/10600.arc`, `ch/10600_vfx.arc` |
-| Short weapons | `11100` | `ch/11100.arc`, `ch/11100_mot.arc`, `ch/11100_vfx.arc` |
-| Short weapons | `11500` | `ch/11500.arc`, `ch/11500_mot.arc`, `ch/11500_vfx.arc` |
-| Short weapons | `11607` | `ch/11607.arc`, `ch/11607_mot.arc`, `ch/11607_vfx.arc` |
-| Shield | `12100` | `ch/12100.arc`, `ch/12100_vfx.arc` |
 
-So the first RX-78-2 archive to inspect for the main mobile suit body is:
+So the RX-78-2 archive to inspect for the main mobile suit body is:
 
 ```text
 com.bandainamcoent.gb_jp/files/dlc/archive/ch/10000.arc

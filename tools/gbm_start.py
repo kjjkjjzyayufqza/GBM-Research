@@ -196,7 +196,7 @@ def load_manifest(path: Path) -> dict[str, object]:
 def entry_output_paths(manifest: dict[str, object]) -> list[Path]:
     entries = manifest.get("entries")
     if not isinstance(entries, list):
-        raise ValueError("Manifest does not contain an entries list")
+        return []
     outputs = []
     for entry in entries:
         if isinstance(entry, dict) and isinstance(entry.get("output"), str):
@@ -260,8 +260,10 @@ def unique_model_directory_names(mod_paths: list[Path]) -> dict[Path, str]:
 def arc_extract_command(
     arc_path: Path,
     extracted_dir: Path,
-    manifest_path: Path,
+    manifest_path: Path | None = None,
     limit: int | None = None,
+    model_assets_only: bool = False,
+    write_manifest: bool = True,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -269,11 +271,15 @@ def arc_extract_command(
         str(arc_path),
         "-o",
         str(extracted_dir),
-        "--manifest",
-        str(manifest_path),
     ]
+    if write_manifest:
+        command.extend(["--manifest", str(manifest_path or extracted_dir / "_manifest.json")])
+    else:
+        command.append("--no-manifest")
     if limit is not None:
         command.extend(["--limit", str(limit)])
+    if model_assets_only:
+        command.append("--model-assets-only")
     return command
 
 

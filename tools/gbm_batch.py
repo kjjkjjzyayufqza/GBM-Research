@@ -23,7 +23,6 @@ from gbm_start import (  # noqa: E402
     add_export_options,
     arc_extract_command,
     convert_model_textures,
-    load_manifest,
     obj_probe_command,
     run_blender_batch,
     run_command,
@@ -53,16 +52,22 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
-        "input",
+        "inputs",
+        metavar="input",
+        nargs="+",
         type=Path,
-        help="Input .arc file or folder containing .arc files. Drag/drop friendly.",
+        help=(
+            "One or more .arc files or folders containing .arc files. "
+            "Drag/drop friendly."
+        ),
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
         help=(
-            "Output root. Defaults to GBM-Research/out/batch/<input-name>. "
+            "Output root. Defaults to GBM-Research/out/batch/<input-name> for a "
+            "single input, or GBM-Research/out/batch for multiple inputs. "
             "Relative ARC folders and ARC stems are preserved below this root."
         ),
     )
@@ -116,10 +121,14 @@ def iter_arc_files(input_path: Path) -> list[Path]:
     return arcs
 
 
-def resolve_output_root(input_path: Path, requested_output: Path | None) -> Path:
+def resolve_output_root(
+    input_paths: list[Path], requested_output: Path | None
+) -> Path:
     if requested_output:
         return requested_output.resolve()
-    return (DEFAULT_OUTPUT_ROOT / input_path.stem).resolve()
+    if len(input_paths) == 1:
+        return (DEFAULT_OUTPUT_ROOT / input_paths[0].stem).resolve()
+    return DEFAULT_OUTPUT_ROOT.resolve()
 
 
 def arc_output_root(input_root: Path, output_root: Path, arc_path: Path) -> Path:
@@ -239,15 +248,20 @@ def export_all_models(
     for arc_path in arcs:
         arc_root = arc_output_root(input_path, output_root, arc_path)
         extracted_dir = arc_root / "extracted"
-        manifest_path = extracted_dir / "_manifest.json"
         run_command(
-            arc_extract_command(arc_path, extracted_dir, manifest_path, limit), dry_run
+            arc_extract_command(
+                arc_path,
+                extracted_dir,
+                limit=limit,
+                model_assets_only=True,
+                write_manifest=False,
+            ),
+            dry_run,
         )
         if dry_run:
             continue
 
-        manifest = load_manifest(manifest_path)
-        mod_paths = select_mod_paths(manifest, extracted_dir, model_stem=None)
+        mod_paths = select_mod_paths({}, extracted_dir, model_stem=None)
         model_names = unique_model_directory_names(mod_paths)
         png_dir = arc_root / "models" / "png"
         convert_model_textures(png_dir, mod_paths, dry_run=False)
@@ -282,7 +296,7 @@ def export_all_models(
 
 def write_summary(
     output_root: Path,
-    input_path: Path,
+    input_paths: list[Path],
     extract_results: list[dict[str, str]],
     model_exports: list[ModelExport],
     blender_jobs: list[BlenderJob],
@@ -290,7 +304,7 @@ def write_summary(
     dry_run: bool,
 ) -> None:
     summary = {
-        "input": str(input_path),
+        "inputs": [str(input_path) for input_path in input_paths],
         "output_root": str(output_root),
         "extracted_arc_count": len(extract_results),
         "model_count": len(model_exports),
@@ -312,48 +326,62 @@ def write_summary(
 
 def main() -> int:
     args = parse_args()
-    input_path = args.input.resolve()
-    output_root = resolve_output_root(input_path, args.output)
-    arcs = iter_arc_files(input_path)
+    input_paths = [input_path.resolve() for input_path in args.inputs]
+    output_root = resolve_output_root(input_paths, args.output)
     mfx_path = args.mfx.resolve()
     if not args.extract_only and not mfx_path.exists():
         raise FileNotFoundError(f"MFX file not found: {mfx_path}")
 
     if not args.dry_run:
         output_root.mkdir(parents=True, exist_ok=True)
-    if args.extract_only:
-        extract_results = extract_only(
+
+    extract_results: list[dict[str, str]] = []
+    model_exports: list[ModelExport] = []
+    blender_jobs: list[BlenderJob] = []
+    failures: list[dict[str, str]] = []
+
+    for input_path in input_paths:
+        arcs = iter_arc_files(input_path)
+        if args.extract_only:
+            extract_results.extend(
+                extract_only(
+                    input_path=input_path,
+                    output_root=output_root,
+                    arcs=arcs,
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                )
+            )
+            continue
+
+        batch_exports, batch_jobs, batch_failures = export_all_models(
             input_path=input_path,
             output_root=output_root,
             arcs=arcs,
+            mfx_path=mfx_path,
+            export_format=args.format,
+            lod=args.lod,
+            want_preview=args.preview,
+            want_report=args.report,
             limit=args.limit,
             dry_run=args.dry_run,
         )
-        write_summary(output_root, input_path, extract_results, [], [], [], args.dry_run)
-        return 0
+        model_exports.extend(batch_exports)
+        blender_jobs.extend(batch_jobs)
+        failures.extend(batch_failures)
 
-    model_exports, blender_jobs, failures = export_all_models(
-        input_path=input_path,
-        output_root=output_root,
-        arcs=arcs,
-        mfx_path=mfx_path,
-        export_format=args.format,
-        lod=args.lod,
-        want_preview=args.preview,
-        want_report=args.report,
-        limit=args.limit,
-        dry_run=args.dry_run,
-    )
-    run_blender_batch(
-        output_root=output_root,
-        blender_path=args.blender.resolve(),
-        jobs=blender_jobs,
-        dry_run=args.dry_run,
-    )
+    if not args.extract_only:
+        run_blender_batch(
+            output_root=output_root,
+            blender_path=args.blender.resolve(),
+            jobs=blender_jobs,
+            dry_run=args.dry_run,
+        )
+
     write_summary(
         output_root,
-        input_path,
-        [],
+        input_paths,
+        extract_results,
         model_exports,
         blender_jobs,
         failures,

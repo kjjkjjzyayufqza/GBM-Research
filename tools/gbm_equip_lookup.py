@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,8 +18,11 @@ DEFAULT_NATIVE_ANDROID = (
 DEFAULT_ARCHIVE_ROOT = (
     WORKSPACE_ROOT / "com.bandainamcoent.gb_jp" / "files" / "dlc" / "archive"
 )
+DEFAULT_ARCHIVE_INDEX = REPO_ROOT / "tools" / "gbm_archive_lookup_index.csv"
+DEFAULT_PARTS_INDEX = REPO_ROOT / "tools" / "gbm_equip_parts_index.csv"
 
 VALUE_MARKER = b"\x01\x00\x00\x00"
+SUIT_PART_TYPES = frozenset({0, 1, 2, 3, 4})
 
 PART_TYPE_NAMES = {
     0: "head",
@@ -44,6 +48,19 @@ class EquipMatch:
     parts_type: int
     parts_type_name: str
     archive_variants: list[str]
+
+
+@dataclass(frozen=True)
+class ArchiveIndexRow:
+    serial_name: str
+    gunpla_id: int
+    model_id: int
+    part_types: str
+    parts_count: int
+    primary_ch_archive: str
+    has_ch_archive: str
+    ch_archives: str
+    source_tables: str
 
 
 def is_reasonable_serial(value: str) -> bool:
@@ -76,9 +93,18 @@ def archive_variants(archive_root: Path, model_id: int) -> list[str]:
     return sorted(matches)
 
 
-def scan_table(path: Path, query: str, archive_root: Path, exact: bool) -> list[EquipMatch]:
+def is_suit_part(match: EquipMatch) -> bool:
+    return match.parts_type in SUIT_PART_TYPES
+
+
+def scan_table(
+    path: Path,
+    query: str | None,
+    archive_root: Path,
+    exact: bool,
+) -> list[EquipMatch]:
     data = path.read_bytes()
-    query_folded = query.casefold()
+    query_folded = query.casefold() if query is not None else None
     matches: list[EquipMatch] = []
 
     cursor = 0
@@ -102,11 +128,12 @@ def scan_table(path: Path, query: str, archive_root: Path, exact: bool) -> list[
         if not is_reasonable_serial(serial_name):
             continue
 
-        if exact:
-            if serial_name.casefold() != query_folded:
+        if query_folded is not None:
+            if exact:
+                if serial_name.casefold() != query_folded:
+                    continue
+            elif query_folded not in serial_name.casefold():
                 continue
-        elif query_folded not in serial_name.casefold():
-            continue
 
         previous = collect_previous_int_values(data, marker)
         if len(previous) < 9:
@@ -174,6 +201,178 @@ def find_matches(
     )
 
 
+def scan_equip_tables(
+    native_android: Path,
+    archive_root: Path,
+    query: str | None = None,
+    exact: bool = False,
+) -> list[EquipMatch]:
+    equip_dir = native_android / "tuning" / "equip"
+    if not equip_dir.exists():
+        raise FileNotFoundError(f"equip table directory not found: {equip_dir}")
+
+    matches: list[EquipMatch] = []
+    for table in sorted(equip_dir.glob("table_*.*")):
+        matches.extend(scan_table(table, query, archive_root, exact))
+    return matches
+
+
+def unit_order(matches: list[EquipMatch]) -> dict[tuple[str, int], int]:
+    order: dict[tuple[str, int], int] = {}
+    body_matches = [
+        match
+        for match in matches
+        if match.parts_type == 1 and match.table == "table_body.etb"
+    ]
+    for match in sorted(body_matches, key=lambda item: item.offset):
+        order.setdefault((match.serial_name, match.gunpla_id), len(order))
+    return order
+
+
+def ordered_matches(matches: list[EquipMatch]) -> list[EquipMatch]:
+    order = unit_order(matches)
+    return sorted(
+        matches,
+        key=lambda item: (
+            order.get((item.serial_name, item.gunpla_id), 1_000_000),
+            item.serial_name,
+            item.gunpla_id,
+            item.model_id,
+            item.parts_type,
+            item.parts_id,
+            item.table,
+        ),
+    )
+
+
+def primary_archive(model_id: int, variants: list[str]) -> str:
+    exact = f"ch/{model_id}.arc"
+    if exact in variants:
+        return exact
+    for variant in variants:
+        name = Path(variant).name
+        if name.endswith(".arc") and "_" not in name.removesuffix(".arc"):
+            return variant
+    return variants[0] if variants else ""
+
+
+def archive_index_rows(matches: list[EquipMatch]) -> list[ArchiveIndexRow]:
+    groups: dict[tuple[str, int, int], list[EquipMatch]] = {}
+    for match in matches:
+        groups.setdefault(
+            (match.serial_name, match.gunpla_id, match.model_id), []
+        ).append(match)
+
+    rows: list[ArchiveIndexRow] = []
+    for (serial_name, gunpla_id, model_id), group in groups.items():
+        part_types = sorted(
+            {match.parts_type_name for match in group},
+            key=lambda name: min(
+                match.parts_type for match in group if match.parts_type_name == name
+            ),
+        )
+        source_tables = sorted({match.table for match in group})
+        variants = sorted(
+            {variant for match in group for variant in match.archive_variants}
+        )
+        rows.append(
+            ArchiveIndexRow(
+                serial_name=serial_name,
+                gunpla_id=gunpla_id,
+                model_id=model_id,
+                part_types="; ".join(part_types),
+                parts_count=len(group),
+                primary_ch_archive=primary_archive(model_id, variants),
+                has_ch_archive="yes" if variants else "no",
+                ch_archives="; ".join(variants),
+                source_tables="; ".join(source_tables),
+            )
+        )
+    order = unit_order(matches)
+    return sorted(
+        rows,
+        key=lambda item: (
+            order.get((item.serial_name, item.gunpla_id), 1_000_000),
+            item.serial_name,
+            item.gunpla_id,
+            item.model_id,
+        ),
+    )
+
+
+def write_parts_index(path: Path, matches: list[EquipMatch]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "serial_name",
+                "gunpla_id",
+                "model_id",
+                "part_type",
+                "parts_id",
+                "parts_name_id",
+                "table_file",
+                "has_ch_archive",
+                "ch_archives",
+            ],
+        )
+        writer.writeheader()
+        for match in ordered_matches(matches):
+            writer.writerow(
+                {
+                    "serial_name": match.serial_name,
+                    "gunpla_id": match.gunpla_id,
+                    "model_id": match.model_id,
+                    "part_type": match.parts_type_name,
+                    "parts_id": match.parts_id,
+                    "parts_name_id": match.parts_name_id,
+                    "table_file": match.table,
+                    "has_ch_archive": "yes" if match.archive_variants else "no",
+                    "ch_archives": "; ".join(match.archive_variants),
+                }
+            )
+
+
+def write_archive_index(path: Path, rows: list[ArchiveIndexRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "serial_name",
+                "gunpla_id",
+                "model_id",
+                "part_types",
+                "parts_count",
+                "primary_ch_archive",
+                "has_ch_archive",
+                "ch_archives",
+                "source_tables",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(asdict(row))
+
+
+def write_indexes(
+    native_android: Path,
+    archive_root: Path,
+    archive_index: Path,
+    parts_index: Path,
+    include_non_suit_parts: bool,
+) -> tuple[list[ArchiveIndexRow], list[EquipMatch]]:
+    matches = scan_equip_tables(native_android, archive_root)
+    if not include_non_suit_parts:
+        matches = [match for match in matches if is_suit_part(match)]
+
+    rows = archive_index_rows(matches)
+    write_archive_index(archive_index, rows)
+    write_parts_index(parts_index, matches)
+    return rows, matches
+
+
 def print_summary(matches: list[EquipMatch]) -> None:
     if not matches:
         print("no matches")
@@ -211,7 +410,11 @@ def main() -> int:
             "report the model_id values that map to ch/*.arc archives."
         )
     )
-    parser.add_argument("query", help="Serial name query, for example RX-78-2")
+    parser.add_argument(
+        "query",
+        nargs="?",
+        help="Serial name query, for example RX-78-2",
+    )
     parser.add_argument(
         "--native-android",
         type=Path,
@@ -232,7 +435,49 @@ def main() -> int:
     parser.add_argument("--gunpla-id", type=int, help="Only show one gunpla_id.")
     parser.add_argument("--model-id", type=int, help="Only show one model_id.")
     parser.add_argument("--json", action="store_true", help="Write JSON output.")
+    parser.add_argument(
+        "--write-indexes",
+        action="store_true",
+        help=(
+            "Regenerate the lookup CSV files. By default this writes only suit "
+            "body resources from head/body/arms/legs/backpack tables."
+        ),
+    )
+    parser.add_argument(
+        "--include-non-suit-parts",
+        action="store_true",
+        help="When writing indexes, include weapon and shield equip rows too.",
+    )
+    parser.add_argument(
+        "--archive-index",
+        type=Path,
+        default=DEFAULT_ARCHIVE_INDEX,
+        help=f"Archive index CSV path. Defaults to {DEFAULT_ARCHIVE_INDEX}.",
+    )
+    parser.add_argument(
+        "--parts-index",
+        type=Path,
+        default=DEFAULT_PARTS_INDEX,
+        help=f"Part index CSV path. Defaults to {DEFAULT_PARTS_INDEX}.",
+    )
     args = parser.parse_args()
+
+    if args.write_indexes:
+        archive_rows, part_rows = write_indexes(
+            args.native_android.resolve(),
+            args.archive_root.resolve(),
+            args.archive_index.resolve(),
+            args.parts_index.resolve(),
+            args.include_non_suit_parts,
+        )
+        print(
+            f"wrote {len(archive_rows)} archive rows to {args.archive_index} "
+            f"and {len(part_rows)} part rows to {args.parts_index}"
+        )
+        return 0
+
+    if args.query is None:
+        parser.error("query is required unless --write-indexes is used")
 
     matches = find_matches(
         args.native_android.resolve(),

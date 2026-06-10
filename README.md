@@ -352,8 +352,8 @@ GBM-Research/
     gbm_mfx_inspect.py       # MFX input-layout inspector
     gbm_lmt_inspect.py       # deferred LMT motion inspector
     gbm_equip_lookup.py      # serial_name/model_id lookup for ch archives
-    gbm_archive_lookup_index.csv # human-readable serial_name -> model_id index
-    gbm_equip_parts_index.csv    # complete part-level equip table index
+    gbm_archive_lookup_index.csv # body serial_name -> model_id index
+    gbm_equip_parts_index.csv    # body part-level equip table index
     ShaderPackage.mfx        # required for MOD vertex layout decoding
   STATUS_STATIC_EXTRACTION.md
   STATIC_EXTRACTION_PIPELINE.md

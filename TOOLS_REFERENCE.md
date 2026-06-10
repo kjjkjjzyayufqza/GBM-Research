@@ -131,13 +131,17 @@ tools\gbm_equip_parts_index.csv
 ```
 
 These CSVs preserve the source unit order from `table_body.etb` instead of
-sorting `serial_name` alphabetically.
+sorting `serial_name` alphabetically. By default the generated CSVs are mobile
+suit body indexes only: head, body, arms, legs, and backpack. Weapon and shield
+rows stay available through direct lookup and can be included in generated CSVs
+only with `--include-non-suit-parts`.
 
 Example:
 
 ```powershell
 python .\tools\gbm_equip_lookup.py RX-78-2 --exact
 python .\tools\gbm_equip_lookup.py RX-78-2 --exact --gunpla-id 10000
+python .\tools\gbm_equip_lookup.py --write-indexes
 ```
 
 Use this before extraction when the human-facing unit name is known but the

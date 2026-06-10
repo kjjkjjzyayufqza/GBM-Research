@@ -181,6 +181,24 @@ def iter_limited(entries: Iterable[ArcEntry], limit: int | None) -> Iterable[Arc
         yield entry
 
 
+def is_model_asset_entry(entry: ArcEntry) -> bool:
+    """Return True for MOD/MRL/TEX resources under a mod directory tree."""
+
+    normalized = entry.name.replace("\\", "/").lower()
+    return "/mod/" in normalized or normalized.endswith("/mod")
+
+
+def select_entries(
+    entries: Iterable[ArcEntry],
+    limit: int | None,
+    model_assets_only: bool,
+) -> list[ArcEntry]:
+    selected = list(iter_limited(entries, limit))
+    if not model_assets_only:
+        return selected
+    return [entry for entry in selected if is_model_asset_entry(entry)]
+
+
 def load_archive(path: Path, key: bytes) -> tuple[bytes, list[ArcEntry]]:
     archive_data = path.read_bytes()
     _version, file_count = parse_header(archive_data)
@@ -270,6 +288,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Manifest JSON path. Defaults to <output>/_manifest.json when extracting.",
     )
     parser.add_argument(
+        "--no-manifest",
+        action="store_true",
+        help="Do not write a manifest JSON file.",
+    )
+    parser.add_argument(
         "--dump-decrypted",
         type=Path,
         metavar="OUTPUT",
@@ -279,11 +302,19 @@ def main(argv: list[str] | None = None) -> int:
             "removed but zlib-compressed payloads are preserved."
         ),
     )
+    parser.add_argument(
+        "--model-assets-only",
+        action="store_true",
+        help=(
+            "Only extract static model resources from */mod/ paths, skipping "
+            "motion, shell, sound, vfx, and other archive entries."
+        ),
+    )
     args = parser.parse_args(argv)
 
     key = bytes.fromhex(args.key_hex)
     archive_data, entries = load_archive(args.archive, key)
-    selected_entries = list(iter_limited(entries, args.limit))
+    selected_entries = select_entries(entries, args.limit, args.model_assets_only)
 
     if args.list_only:
         for entry in selected_entries:
@@ -314,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         "archive": str(args.archive),
         "file_count": len(entries),
         "extracted_count": len(selected_entries),
+        "model_assets_only": args.model_assets_only,
         "entries": [],
     }
 
@@ -335,14 +367,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         manifest["entries"].append(record)
 
-    manifest_path = args.manifest or output_dir / "_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
     print(
         f"extracted {len(selected_entries)} / {len(entries)} entries "
         f"from {args.archive} to {output_dir}"
     )
+    if args.no_manifest:
+        return 0
+
+    manifest_path = args.manifest or output_dir / "_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"manifest: {manifest_path}")
     return 0
 
