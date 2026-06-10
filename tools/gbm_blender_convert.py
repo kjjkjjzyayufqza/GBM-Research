@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import bpy
@@ -25,7 +27,11 @@ if str(TOOLS_DIRECTORY) not in sys.path:
 
 from gbm_mfx_inspect import parse_input_layouts  # noqa: E402
 from gbm_lmt_inspect import decode_motion_tracks, sample_track  # noqa: E402
-from gbm_mod_inspect import parse_header, parse_primitive_records  # noqa: E402
+from gbm_mod_inspect import (  # noqa: E402
+    parse_header,
+    parse_primitive_records,
+    read_material_names,
+)
 from gbm_mod_obj_probe import (  # noqa: E402
     derive_bind_decode_matrix,
     matrix_from_bytes,
@@ -33,15 +39,43 @@ from gbm_mod_obj_probe import (  # noqa: E402
     parse_bone_palettes,
     select_primitives_for_lod,
 )
+from gbm_mrl_inspect import material_bindings  # noqa: E402
+
+
+@dataclass(frozen=True)
+class BlenderConversionJob:
+    input_obj: Path
+    output_fbx: Path
+    texture: Path | None = None
+    normal_texture: Path | None = None
+    mrl: Path | None = None
+    png_dir: Path | None = None
+    mod: Path | None = None
+    mfx: Path | None = None
+    lmt: Path | None = None
+    motion_index: int | None = None
+    preview_frame: int | None = None
+    preview: Path | None = None
+    report: Path | None = None
+    scale: float = 0.01
+    lod: int = 0
+    axis_mode: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-obj", required=True, type=Path)
-    parser.add_argument("--output-fbx", required=True, type=Path)
+    parser.add_argument(
+        "--batch-manifest",
+        type=Path,
+        help="JSON file containing a jobs list for multi-FBX conversion.",
+    )
+    parser.add_argument("--input-obj", type=Path)
+    parser.add_argument("--output-fbx", type=Path)
     parser.add_argument("--texture", type=Path)
     parser.add_argument("--normal-texture", type=Path)
+    parser.add_argument("--mrl", type=Path)
+    parser.add_argument("--png-dir", type=Path)
     parser.add_argument("--mod", type=Path)
     parser.add_argument("--mfx", type=Path)
     parser.add_argument("--lmt", type=Path)
@@ -68,7 +102,77 @@ def parse_args() -> argparse.Namespace:
             "# axis_mode: value written by gbm_mod_obj_probe.py."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.batch_manifest and (args.input_obj or args.output_fbx):
+        parser.error("--batch-manifest cannot be combined with --input-obj/--output-fbx")
+    if not args.batch_manifest and (not args.input_obj or not args.output_fbx):
+        parser.error("--input-obj and --output-fbx are required without --batch-manifest")
+    return args
+
+
+def optional_path(value: object) -> Path | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"expected path string or null, got {type(value).__name__}")
+    return Path(value)
+
+
+def load_batch_jobs(path: Path) -> list[BlenderConversionJob]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        raise ValueError("batch manifest must contain a jobs list")
+
+    loaded_jobs: list[BlenderConversionJob] = []
+    for index, raw_job in enumerate(jobs):
+        if not isinstance(raw_job, dict):
+            raise ValueError(f"job {index} is not an object")
+        try:
+            loaded_jobs.append(
+                BlenderConversionJob(
+                    input_obj=Path(raw_job["input_obj"]),
+                    output_fbx=Path(raw_job["output_fbx"]),
+                    texture=optional_path(raw_job.get("texture")),
+                    normal_texture=optional_path(raw_job.get("normal_texture")),
+                    mrl=optional_path(raw_job.get("mrl")),
+                    png_dir=optional_path(raw_job.get("png_dir")),
+                    mod=optional_path(raw_job.get("mod")),
+                    mfx=optional_path(raw_job.get("mfx")),
+                    lmt=optional_path(raw_job.get("lmt")),
+                    motion_index=raw_job.get("motion_index"),
+                    preview_frame=raw_job.get("preview_frame"),
+                    preview=optional_path(raw_job.get("preview")),
+                    report=optional_path(raw_job.get("report")),
+                    scale=float(raw_job.get("scale", 0.01)),
+                    lod=int(raw_job.get("lod", 0)),
+                    axis_mode=raw_job.get("axis_mode"),
+                )
+            )
+        except KeyError as exc:
+            raise ValueError(f"job {index} is missing {exc.args[0]!r}") from exc
+    return loaded_jobs
+
+
+def job_from_args(args: argparse.Namespace) -> BlenderConversionJob:
+    return BlenderConversionJob(
+        input_obj=args.input_obj,
+        output_fbx=args.output_fbx,
+        texture=args.texture,
+        normal_texture=args.normal_texture,
+        mrl=args.mrl,
+        png_dir=args.png_dir,
+        mod=args.mod,
+        mfx=args.mfx,
+        lmt=args.lmt,
+        motion_index=args.motion_index,
+        preview_frame=args.preview_frame,
+        preview=args.preview,
+        report=args.report,
+        scale=args.scale,
+        lod=args.lod,
+        axis_mode=args.axis_mode,
+    )
 
 
 def read_obj_header_metadata(path: Path) -> dict[str, str]:
@@ -94,21 +198,27 @@ def resolve_axis_mode(path: Path, requested: str | None) -> str:
 
 
 def engine_to_blender_axis_matrix() -> Matrix:
+    # Exactly the rotation Blender's OBJ importer applies with
+    # forward_axis="Z", up_axis="Y": engine (x, y, z) -> Blender (-x, z, y).
+    # This is Rx(90deg) composed with a 180deg yaw; using only Rx(90deg) here
+    # leaves the skeleton rotated 180deg against the mesh (left/right bones
+    # end up driving the opposite side).
     return Matrix(
         (
-            (1.0, 0.0, 0.0, 0.0),
-            (0.0, 0.0, -1.0, 0.0),
+            (-1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
             (0.0, 1.0, 0.0, 0.0),
             (0.0, 0.0, 0.0, 1.0),
         )
     )
 
 
-def convert_bind_matrix(matrix: Matrix, axis_mode: str, scale: float) -> Matrix:
-    converted = matrix.copy()
-    if axis_mode == "blender":
-        axis_matrix = engine_to_blender_axis_matrix()
-        converted = axis_matrix @ converted @ axis_matrix.inverted()
+def convert_bind_matrix(matrix: Matrix, scale: float) -> Matrix:
+    # import_obj always brings the mesh into Blender's Z-up frame (up_axis="Y"),
+    # so the engine-space bind matrices must always be rotated to match it.
+    # Otherwise the mesh stands upright while the skeleton lies along +Y.
+    axis_matrix = engine_to_blender_axis_matrix()
+    converted = axis_matrix @ matrix.copy() @ axis_matrix.inverted()
     converted.translation *= scale
     return converted
 
@@ -131,18 +241,25 @@ def clear_scene() -> None:
 
 
 def import_obj(path: Path) -> list[bpy.types.Object]:
+    # Splitting must stay off: skin weights from the MOD are matched to the
+    # imported mesh purely by vertex order, which only survives when the OBJ
+    # is imported as a single mesh in file order.
     before = set(bpy.data.objects)
     if hasattr(bpy.ops.wm, "obj_import"):
         bpy.ops.wm.obj_import(
             filepath=str(path),
             forward_axis="Z",
             up_axis="Y",
+            use_split_objects=False,
+            use_split_groups=False,
         )
     else:
         bpy.ops.import_scene.obj(
             filepath=str(path),
             axis_forward="Z",
             axis_up="Y",
+            use_split_objects=False,
+            use_split_groups=False,
         )
     return [
         obj
@@ -190,12 +307,13 @@ def copy_texture(source: Path, output_directory: Path) -> Path:
     return destination
 
 
-def build_material(
-    output_directory: Path,
-    texture: Path | None,
+def setup_material_nodes(
+    material: bpy.types.Material,
+    base_texture: Path | None,
     normal_texture: Path | None,
-) -> tuple[bpy.types.Material, list[str]]:
-    material = bpy.data.materials.new("ma320900_material")
+    output_directory: Path,
+) -> list[str]:
+    """Rebuild a material's node tree as a textured Principled BSDF."""
     material.use_nodes = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
@@ -208,8 +326,8 @@ def build_material(
     links.new(shader.outputs["BSDF"], output.inputs["Surface"])
 
     image_paths: list[str] = []
-    if texture:
-        copied = copy_texture(texture, output_directory)
+    if base_texture:
+        copied = copy_texture(base_texture, output_directory)
         image = bpy.data.images.load(str(copied), check_existing=True)
         image_node = nodes.new("ShaderNodeTexImage")
         image_node.image = image
@@ -235,7 +353,60 @@ def build_material(
         links.new(normal_node.outputs["Normal"], shader.inputs["Normal"])
         image_paths.append(str(copied))
 
+    return image_paths
+
+
+def build_material(
+    output_directory: Path,
+    texture: Path | None,
+    normal_texture: Path | None,
+) -> tuple[bpy.types.Material, list[str]]:
+    material = bpy.data.materials.new("gbm_material")
+    image_paths = setup_material_nodes(material, texture, normal_texture, output_directory)
     return material, image_paths
+
+
+def material_slot_index(name: str) -> int | None:
+    match = re.match(r"mat_(\d+)", name)
+    return int(match.group(1)) if match else None
+
+
+def apply_mrl_materials(
+    model: bpy.types.Object,
+    mod_path: Path,
+    mrl_path: Path,
+    png_dir: Path,
+    output_directory: Path,
+) -> list[str]:
+    """Rebuild every imported material slot from its MRL texture binding.
+
+    Bindings are matched through the MOD material name table by name hash;
+    MRL texture order does not follow the MOD material order.
+    """
+    mod_data = mod_path.read_bytes()
+    material_names = read_material_names(mod_data, parse_header(mod_path, mod_data))
+    bindings = material_bindings(mrl_path, material_names)
+    image_paths: list[str] = []
+    for material in model.data.materials:
+        if material is None:
+            continue
+        index = material_slot_index(material.name)
+        if index is None or index >= len(bindings):
+            raise ValueError(
+                f"material slot {material.name!r} has no binding in {mrl_path}"
+            )
+        binding = bindings[index]
+        base = png_dir / f"{binding.base}.png" if binding.base else None
+        normal = png_dir / f"{binding.normal}.png" if binding.normal else None
+        image_paths.extend(
+            setup_material_nodes(material, base, normal, output_directory)
+        )
+    return image_paths
+
+
+def shade_smooth(model: bpy.types.Object) -> None:
+    for polygon in model.data.polygons:
+        polygon.use_smooth = True
 
 
 def assign_material(model: bpy.types.Object, material: bpy.types.Material) -> None:
@@ -243,7 +414,53 @@ def assign_material(model: bpy.types.Object, material: bpy.types.Material) -> No
     model.data.materials.append(material)
     for polygon in model.data.polygons:
         polygon.material_index = 0
-        polygon.use_smooth = True
+    shade_smooth(model)
+
+
+def split_mesh_by_material(model: bpy.types.Object) -> list[bpy.types.Object]:
+    """Split the converted mesh into one object per material slot.
+
+    Each game part owns a full UV space on its own texture, so keeping all
+    parts in one mesh stacks unrelated UV islands. Splitting after skinning
+    preserves vertex groups, the armature modifier, and parenting on every
+    piece.
+    """
+    if len(model.data.materials) <= 1:
+        return [model]
+
+    base_name = model.name
+    before = set(bpy.data.objects)
+    bpy.ops.object.select_all(action="DESELECT")
+    model.select_set(True)
+    bpy.context.view_layer.objects.active = model
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.separate(type="MATERIAL")
+    bpy.ops.object.mode_set(mode="OBJECT")
+    pieces = [model, *(obj for obj in bpy.data.objects if obj not in before)]
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for piece in pieces:
+        piece.select_set(True)
+    bpy.context.view_layer.objects.active = pieces[0]
+    bpy.ops.object.material_slot_remove_unused()
+
+    named_pieces: list[tuple[str, bpy.types.Object]] = []
+    for piece in pieces:
+        material = next(
+            (slot.material for slot in piece.material_slots if slot.material),
+            None,
+        )
+        if material is None:
+            raise RuntimeError(
+                f"separated mesh {piece.name!r} has no material slot"
+            )
+        named_pieces.append((material.name, piece))
+    named_pieces.sort(key=lambda entry: entry[0])
+    for material_name, piece in named_pieces:
+        piece.name = f"{base_name}_{material_name}"
+        piece.data.name = f"{piece.name}_mesh"
+    return [piece for _, piece in named_pieces]
 
 
 def find_layout_element(layout: object, semantic: str) -> object | None:
@@ -417,7 +634,7 @@ def build_armature(
         )
 
     bone_matrices = [
-        convert_bind_matrix(source_matrix, axis_mode, scale)
+        convert_bind_matrix(source_matrix, scale)
         for source_matrix in source_world_matrices
     ]
 
@@ -544,12 +761,10 @@ def apply_lmt_motion(
             f"motion {motion_index} has unmapped joint tracks {unresolved_tracks}"
         )
 
-    axis_matrix = (
-        engine_to_blender_axis_matrix()
-        if axis_mode == "blender"
-        else None
-    )
-    axis_inverse = axis_matrix.inverted() if axis_matrix is not None else None
+    # Match the unconditional engine->blender rotation applied to the bind pose
+    # in convert_bind_matrix so animated poses share the mesh's Z-up frame.
+    axis_matrix = engine_to_blender_axis_matrix()
+    axis_inverse = axis_matrix.inverted()
     action = bpy.data.actions.new(
         name=f"{armature.name}_motion_{motion_index:02d}"
     )
@@ -630,8 +845,7 @@ def apply_lmt_motion(
         scene.frame_set(blender_frame)
         for bone_index, target_world in enumerate(target_world_matrices):
             converted = root_motion @ target_world
-            if axis_matrix is not None and axis_inverse is not None:
-                converted = axis_matrix @ converted @ axis_inverse
+            converted = axis_matrix @ converted @ axis_inverse
             converted = converted.copy()
             converted.translation *= scale
             pose_bone = armature.pose.bones[f"Bone_{bone_index:03d}"]
@@ -859,8 +1073,11 @@ def export_fbx(
         mesh_smooth_type="FACE",
         use_mesh_modifiers=True,
         add_leaf_bones=False,
-        primary_bone_axis="-X",
-        secondary_bone_axis="Y",
+        # Defaults keep the bone-axis correction at identity; a non-default
+        # primary axis leaks the whole correction into the root bone's node
+        # rotation (Bone_000 showed 90/90/0 with primary_bone_axis="-X").
+        primary_bone_axis="Y",
+        secondary_bone_axis="X",
         use_armature_deform_only=False,
         bake_anim=bake_animation,
         bake_anim_use_all_actions=False,
@@ -885,62 +1102,91 @@ def verify_fbx(path: Path, frame: int) -> dict[str, object]:
     return scene_stats(imported)
 
 
-def main() -> None:
-    args = parse_args()
-    input_obj = args.input_obj.resolve()
-    output_fbx = args.output_fbx.resolve()
+def convert_job(job: BlenderConversionJob) -> dict[str, object]:
+    input_obj = job.input_obj.resolve()
+    output_fbx = job.output_fbx.resolve()
     output_fbx.parent.mkdir(parents=True, exist_ok=True)
-    preview = args.preview.resolve() if args.preview else None
-    report = args.report.resolve() if args.report else None
+    preview = job.preview.resolve() if job.preview else None
+    report = job.report.resolve() if job.report else None
     if preview:
         preview.parent.mkdir(parents=True, exist_ok=True)
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
 
-    axis_mode = resolve_axis_mode(input_obj, args.axis_mode)
+    axis_mode = resolve_axis_mode(input_obj, job.axis_mode)
+
+    if bool(job.mod) != bool(job.mfx):
+        raise ValueError("--mod and --mfx must be provided together")
+    if job.mrl and job.png_dir and not job.mod:
+        raise ValueError(
+            "--mrl requires --mod: material bindings are matched through the "
+            "MOD material name table"
+        )
+    if job.mod and axis_mode != "engine":
+        raise ValueError(
+            "skin binding requires an engine axis_mode OBJ; legacy blender "
+            "axis OBJs cannot be aligned with the MOD bind skeleton"
+        )
+    if job.lmt and (not job.mod or job.motion_index is None):
+        raise ValueError("--lmt requires --mod, --mfx, and --motion-index")
+    if job.motion_index is not None and not job.lmt:
+        raise ValueError("--motion-index requires --lmt")
+    if job.preview_frame is not None and not job.lmt:
+        raise ValueError("--preview-frame requires --lmt")
+
+    has_bones = False
+    if job.mod:
+        mod_path = job.mod.resolve()
+        has_bones = parse_header(mod_path, mod_path.read_bytes()).bone_count > 0
+    if job.lmt and not has_bones:
+        raise ValueError("--lmt requires a MOD with bones")
 
     clear_scene()
     model = join_meshes(import_obj(input_obj), input_obj.stem)
     if axis_mode == "engine":
         apply_import_rotation(model)
-    apply_scale(model, args.scale)
-    material, image_paths = build_material(
-        output_fbx.parent,
-        args.texture.resolve() if args.texture else None,
-        args.normal_texture.resolve() if args.normal_texture else None,
-    )
-    assign_material(model, material)
-    export_objects = [model]
+    apply_scale(model, job.scale)
+    if job.mrl and job.png_dir:
+        image_paths = apply_mrl_materials(
+            model,
+            job.mod.resolve(),
+            job.mrl.resolve(),
+            job.png_dir.resolve(),
+            output_fbx.parent,
+        )
+        shade_smooth(model)
+    else:
+        material, image_paths = build_material(
+            output_fbx.parent,
+            job.texture.resolve() if job.texture else None,
+            job.normal_texture.resolve() if job.normal_texture else None,
+        )
+        assign_material(model, material)
+    armature = None
     skin_report = None
     animation_report = None
-    if bool(args.mod) != bool(args.mfx):
-        raise ValueError("--mod and --mfx must be provided together")
-    if args.lmt and (not args.mod or args.motion_index is None):
-        raise ValueError("--lmt requires --mod, --mfx, and --motion-index")
-    if args.motion_index is not None and not args.lmt:
-        raise ValueError("--motion-index requires --lmt")
-    if args.preview_frame is not None and not args.lmt:
-        raise ValueError("--preview-frame requires --lmt")
-    if args.mod and args.mfx:
+    if has_bones:
         armature, skin_report = build_armature(
             model,
-            args.mod.resolve(),
-            args.mfx.resolve(),
-            args.scale,
-            args.lod,
+            job.mod.resolve(),
+            job.mfx.resolve(),
+            job.scale,
+            job.lod,
             axis_mode,
         )
-        export_objects.append(armature)
-        if args.lmt:
+        if job.lmt:
             animation_report = apply_lmt_motion(
                 armature,
-                args.mod.resolve(),
-                args.lmt.resolve(),
-                args.motion_index,
-                args.scale,
+                job.mod.resolve(),
+                job.lmt.resolve(),
+                job.motion_index,
+                job.scale,
                 axis_mode,
             )
-    validation_frame = args.preview_frame if args.preview_frame is not None else 1
+    part_meshes = split_mesh_by_material(model)
+    part_names = [part.name for part in part_meshes]
+    export_objects = [*part_meshes, *([armature] if armature else [])]
+    validation_frame = job.preview_frame if job.preview_frame is not None else 1
     if validation_frame < 1:
         raise ValueError("--preview-frame must be at least 1")
     if animation_report and validation_frame > animation_report["frame_count"]:
@@ -953,7 +1199,7 @@ def main() -> None:
     source_stats = scene_stats(export_objects)
 
     if preview:
-        render_preview(preview, [model])
+        render_preview(preview, part_meshes)
     export_fbx(
         output_fbx,
         export_objects,
@@ -965,19 +1211,20 @@ def main() -> None:
         "input_obj": str(input_obj),
         "output_fbx": str(output_fbx),
         "fbx_size": output_fbx.stat().st_size,
-        "lod": args.lod,
+        "lod": job.lod,
         "axis_mode": axis_mode,
-        "scale": args.scale,
+        "scale": job.scale,
         "validation_frame": validation_frame,
         "fbx_export_settings": {
             "use_space_transform": True,
             "bake_space_transform": False,
             "axis_forward": "Z",
             "axis_up": "Y",
-            "primary_bone_axis": "-X",
-            "secondary_bone_axis": "Y",
+            "primary_bone_axis": "Y",
+            "secondary_bone_axis": "X",
         },
         "image_paths": image_paths,
+        "mesh_parts": part_names,
         "preview": str(preview) if preview else None,
         "skin": skin_report,
         "animation": animation_report,
@@ -986,7 +1233,50 @@ def main() -> None:
     }
     if report:
         report.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(json.dumps(result, indent=2))
+    return result
+
+
+def main() -> None:
+    args = parse_args()
+    if args.batch_manifest:
+        jobs = load_batch_jobs(args.batch_manifest.resolve())
+        results = []
+        failures = []
+        for index, job in enumerate(jobs):
+            try:
+                result = convert_job(job)
+                results.append(result)
+                print(
+                    f"converted {index + 1}/{len(jobs)}: "
+                    f"{result['input_obj']} -> {result['output_fbx']}"
+                )
+            except Exception as exc:
+                failures.append(
+                    {
+                        "index": index,
+                        "input_obj": str(job.input_obj),
+                        "output_fbx": str(job.output_fbx),
+                        "error": str(exc),
+                    }
+                )
+                print(f"error: job {index}: {exc}", file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "batch_manifest": str(args.batch_manifest.resolve()),
+                    "converted_count": len(results),
+                    "failure_count": len(failures),
+                    "results": results,
+                    "failures": failures,
+                },
+                indent=2,
+            )
+        )
+        if failures:
+            raise SystemExit(1)
+        return
+
+    print(json.dumps(convert_job(job_from_args(args)), indent=2))
 
 
 if __name__ == "__main__":

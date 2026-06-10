@@ -485,7 +485,11 @@ Confirmed or strongly supported fields:
 ```text
 0x00  u16  sentinel; observed 0xffff
 0x02  u16  vertex_count
-0x04  u32  packed flags; bits 12..23 contribute material selection
+0x04  u32  packed flags; bits 12..23 are the material slot index (into the
+           model's MRL material list), bits 24..31 are a per-LOD visibility
+           bitmask (0x01=LOD0 highest, 0x02=LOD1, 0x0C=LOD2/LOD3 lowest). The
+           exporter keeps only the primitives whose bit matches the requested
+           LOD and binds each primitive to its MRL material.
 0x08  u16  draw flags; observed 17
 0x0a  u8   stored vertex size; observed 24 or 28
 0x0b  u8   vertex class/flags; observed 4 or 68

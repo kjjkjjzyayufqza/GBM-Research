@@ -23,11 +23,24 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from gbm_mfx_inspect import InputElement, InputLayout, parse_input_layouts
-from gbm_mod_inspect import ModHeader, PrimitiveRecord, parse_header, parse_primitive_records
+from gbm_mod_inspect import (
+    ModHeader,
+    PrimitiveRecord,
+    parse_header,
+    parse_primitive_records,
+    read_material_names,
+)
+from gbm_mrl_inspect import material_bindings
 
 
 Matrix4 = tuple[tuple[float, float, float, float], ...]
 DEFAULT_MFX = Path(__file__).resolve().parent / "ShaderPackage.mfx"
+IDENTITY_MATRIX: Matrix4 = (
+    (1.0, 0.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0, 0.0),
+    (0.0, 0.0, 1.0, 0.0),
+    (0.0, 0.0, 0.0, 1.0),
+)
 
 
 def matrix_from_bytes(data: bytes, offset: int) -> Matrix4:
@@ -66,6 +79,9 @@ def max_matrix_delta(left: Matrix4, right: Matrix4) -> float:
 def derive_bind_decode_matrix(
     data: bytes, header: ModHeader
 ) -> tuple[Matrix4, float, list[int]]:
+    if header.bone_count == 0:
+        return IDENTITY_MATRIX, 0.0, []
+
     bone_info_offset = header.bone_section_offset
     local_matrix_offset = bone_info_offset + header.bone_count * 24
     decode_matrix_offset = local_matrix_offset + header.bone_count * 64
@@ -196,6 +212,8 @@ def find_element(layout: InputLayout, semantic: str) -> InputElement:
 def decode_element(raw_vertex: bytes, element: InputElement) -> tuple[float, ...]:
     offset = element.byte_offset
     count = element.component_count
+    if element.format_id == 1:
+        return struct.unpack_from(f"<{count}f", raw_vertex, offset)
     if element.format_id == 2:
         values = struct.unpack_from(f"<{count}h", raw_vertex, offset)
         return tuple(value / 1024.0 for value in values)
@@ -225,51 +243,57 @@ def axis_transform(
     raise ValueError(f"unsupported axis mode: {axis_mode}")
 
 
-def is_lod_triplet(records: list[PrimitiveRecord]) -> bool:
-    """Return True when three primitives look like high/medium/low LOD variants."""
+def position3(raw_position: tuple[float, ...]) -> tuple[float, float, float]:
+    if len(raw_position) >= 3:
+        return (raw_position[0], raw_position[1], raw_position[2])
+    if len(raw_position) == 2:
+        return (raw_position[0], raw_position[1], 0.0)
+    raise ValueError(f"position has too few components: {len(raw_position)}")
 
-    if len(records) != 3:
-        return False
 
-    sorted_records = sorted(records, key=lambda record: record.group_id)
-    group_ids = [record.group_id for record in sorted_records]
-    if group_ids != [1, 2, 3]:
-        return False
+def decode_normal(
+    raw_vertex: bytes,
+    normal_element: InputElement,
+    axis_mode: str,
+) -> tuple[float, float, float]:
+    try:
+        engine_normal = position3(decode_element(raw_vertex, normal_element))
+        normal = axis_transform(engine_normal, axis_mode)
+    except ValueError:
+        normal = axis_transform((0.0, 1.0, 0.0), axis_mode)
+    normal_length = math.sqrt(sum(component * component for component in normal))
+    if normal_length <= 0:
+        return (0.0, 1.0, 0.0)
+    return tuple(component / normal_length for component in normal)
 
-    vertex_counts = [record.vertex_count for record in sorted_records]
-    return vertex_counts[0] > vertex_counts[1] > vertex_counts[2]
+
+def lod_visibility_mask(record: PrimitiveRecord) -> int:
+    """Per-LOD-level visibility bitmask in the high byte of packed_flags.
+
+    Bit 0 marks the highest-detail level; observed values are 0x01 (LOD0),
+    0x02 (LOD1), and 0x0C (LOD2 and LOD3 share the lowest mesh).
+    """
+    return (record.packed_flags >> 24) & 0xFF
 
 
 def select_primitives_for_lod(
     records: list[PrimitiveRecord], lod: int
 ) -> list[PrimitiveRecord]:
-    """Keep one LOD variant per material group, or all parts when no LOD chain exists."""
+    """Keep only the primitives drawn at the requested LOD level.
 
-    grouped: dict[int, list[PrimitiveRecord]] = {}
-    for record in records:
-        grouped.setdefault(record.material_table_index, []).append(record)
-
-    selected: list[PrimitiveRecord] = []
-    for material_records in grouped.values():
-        if is_lod_triplet(material_records):
-            target_group_id = lod + 1
-            match = next(
-                (
-                    record
-                    for record in material_records
-                    if record.group_id == target_group_id
-                ),
-                None,
-            )
-            if match is None:
-                material_index = material_records[0].material_table_index
-                raise ValueError(
-                    f"LOD {lod} is unavailable for material {material_index}"
-                )
-            selected.append(match)
-        else:
-            selected.extend(material_records)
-
+    A primitive is kept when its LOD bitmask has the requested level's bit set.
+    A mask of 0 means the primitive is not LOD-managed and is always kept.
+    Selecting LOD 0 yields the clearest model; the lower-detail variants drop
+    out instead of stacking on top of it.
+    """
+    level_bit = 1 << lod
+    selected = [
+        record
+        for record in records
+        if lod_visibility_mask(record) == 0 or lod_visibility_mask(record) & level_bit
+    ]
+    if not selected:
+        raise ValueError(f"LOD {lod} selects no primitives")
     return sorted(selected, key=lambda record: record.index)
 
 
@@ -305,6 +329,94 @@ def decode_position(
     raise ValueError(f"unsupported position mode: {mode}")
 
 
+def material_index(record: PrimitiveRecord) -> int:
+    """Material slot a primitive draws with (packed_flags bits 12..23)."""
+    return (record.packed_flags >> 12) & 0xFFF
+
+
+def material_name(index: int) -> str:
+    return f"mat_{index}"
+
+
+def relative_texture(texture_path: Path, mtl_dir: Path) -> str:
+    return os.path.relpath(texture_path, mtl_dir).replace("\\", "/")
+
+
+def mtl_block(name: str, base_png: Path | None, normal_png: Path | None, mtl_dir: Path) -> list[str]:
+    lines = [
+        f"newmtl {name}",
+        "Ka 0.000000 0.000000 0.000000",
+        "Kd 1.000000 1.000000 1.000000",
+        "Ks 0.000000 0.000000 0.000000",
+        "d 1.000000",
+        "illum 1",
+    ]
+    if base_png is not None:
+        lines.append(f"map_Kd {relative_texture(base_png, mtl_dir)}")
+    if normal_png is not None:
+        lines.append(f"map_Bump {relative_texture(normal_png, mtl_dir)}")
+    return lines
+
+
+def resolve_materials(
+    mrl_path: Path,
+    png_dir: Path,
+    material_names: list[str],
+    max_material_index: int,
+) -> list[dict[str, object]]:
+    """Map each MOD material slot to its base/normal PNG via the MRL records.
+
+    Bindings are matched by material name hash; MRL texture-table order does
+    not follow the MOD material order.
+    """
+    if max_material_index >= len(material_names):
+        raise ValueError(
+            f"primitive references material {max_material_index} but the MOD "
+            f"only names {len(material_names)} materials"
+        )
+    bindings = material_bindings(mrl_path, material_names)
+    materials: list[dict[str, object]] = []
+    for binding in bindings:
+        base_png = png_dir / f"{binding.base}.png" if binding.base else None
+        normal_png = png_dir / f"{binding.normal}.png" if binding.normal else None
+        if base_png is not None and not base_png.exists():
+            raise FileNotFoundError(f"material texture not found: {base_png}")
+        materials.append(
+            {
+                "index": binding.index,
+                "name": material_name(binding.index),
+                "material": binding.name,
+                "base_stem": binding.base,
+                "normal_stem": binding.normal,
+                "base_png": str(base_png) if base_png else None,
+                "normal_png": str(normal_png) if normal_png else None,
+            }
+        )
+    return materials
+
+
+def write_material_library(
+    obj_path: Path, materials: list[dict[str, object]]
+) -> Path:
+    mtl_path = obj_path.with_suffix(".mtl")
+    mtl_dir = mtl_path.parent
+    blocks: list[str] = []
+    for material in materials:
+        base = material["base_png"]
+        normal = material["normal_png"]
+        blocks.extend(
+            mtl_block(
+                str(material["name"]),
+                Path(base) if base else None,
+                Path(normal) if normal else None,
+                mtl_dir,
+            )
+        )
+        blocks.append("")
+    mtl_path.write_text("\n".join(blocks), encoding="utf-8")
+    return mtl_path
+
+
 def write_mtl(obj_path: Path, texture_path: Path) -> Path:
     mtl_path = obj_path.with_suffix(".mtl")
     texture_relative = os.path.relpath(texture_path, mtl_path.parent).replace("\\", "/")
@@ -335,6 +447,8 @@ def write_obj_probe(
     axis_mode: str,
     texture_path: Path | None,
     lod: int = 0,
+    mrl_path: Path | None = None,
+    png_dir: Path | None = None,
 ) -> dict:
     data = mod_path.read_bytes()
     header = parse_header(mod_path, data)
@@ -366,7 +480,17 @@ def write_obj_probe(
     )
 
     obj_path.parent.mkdir(parents=True, exist_ok=True)
-    mtl_path = write_mtl(obj_path, texture_path) if texture_path else None
+    materials: list[dict[str, object]] | None = None
+    if mrl_path is not None and png_dir is not None:
+        max_index = max((material_index(record) for record in records), default=0)
+        materials = resolve_materials(
+            mrl_path, png_dir, read_material_names(data, header), max_index
+        )
+        mtl_path = write_material_library(obj_path, materials)
+    elif texture_path:
+        mtl_path = write_mtl(obj_path, texture_path)
+    else:
+        mtl_path = None
     total_vertices = 0
     total_faces = 0
     out_of_range_faces = 0
@@ -382,15 +506,35 @@ def write_obj_probe(
         obj.write(f"# lod: {lod}\n")
         if mtl_path:
             obj.write(f"mtllib {mtl_path.name}\n")
+        if mtl_path and materials is None:
             obj.write("usemtl gbm_material\n")
 
         global_vertex_base = 1
+        last_material: int | None = None
+        object_name_counts: dict[str, int] = {}
+        mesh_objects: list[str] = []
         for record in records:
             layout_id = record.resource_hash_or_key & 0xFFF
             layout = layouts[layout_id]
             position_element = find_element(layout, "Position")
             normal_element = find_element(layout, "Normal")
             uv_element = find_element(layout, "TexCoord")
+            index = material_index(record)
+            if index != last_material:
+                # One OBJ object per material run: each game part keeps its
+                # own texture/UV space, so importers that split by object get
+                # per-part meshes instead of one mesh with stacked UV islands.
+                base_name = f"{mod_path.stem}_{material_name(index)}"
+                occurrence = object_name_counts.get(base_name, 0)
+                object_name_counts[base_name] = occurrence + 1
+                object_name = (
+                    base_name if occurrence == 0 else f"{base_name}_{occurrence}"
+                )
+                obj.write(f"\no {object_name}\n")
+                mesh_objects.append(object_name)
+                if materials is not None:
+                    obj.write(f"usemtl {material_name(index)}\n")
+                last_material = index
             obj.write(
                 f"\ng primitive_{record.index:03d}_layout_{layout_id}_{layout.name}\n"
             )
@@ -403,7 +547,7 @@ def write_obj_probe(
                     + vertex_index * record.vertex_size : vertex_start
                     + (vertex_index + 1) * record.vertex_size
                 ]
-                raw_position = decode_element(vertex_bytes, position_element)[:3]
+                raw_position = position3(decode_element(vertex_bytes, position_element))
                 engine_position = decode_position(
                     raw_position,
                     header,
@@ -415,11 +559,7 @@ def write_obj_probe(
                 position = axis_transform(engine_position, axis_mode)
                 raw_uv = decode_element(vertex_bytes, uv_element)[:2]
                 uv = (raw_uv[0], 1.0 - raw_uv[1])
-                engine_normal = decode_element(vertex_bytes, normal_element)[:3]
-                normal = axis_transform(engine_normal, axis_mode)
-                normal_length = math.sqrt(sum(component * component for component in normal))
-                if normal_length > 0:
-                    normal = tuple(component / normal_length for component in normal)
+                normal = decode_normal(vertex_bytes, normal_element, axis_mode)
 
                 for channel in range(3):
                     decoded_bounds_min[channel] = min(
@@ -460,12 +600,14 @@ def write_obj_probe(
         "obj": str(obj_path),
         "mtl": str(mtl_path) if mtl_path else None,
         "texture": str(texture_path) if texture_path else None,
+        "materials": materials,
         "position_mode": position_mode,
         "axis_mode": axis_mode,
         "lod": lod,
         "primitive_count_total": len(all_records),
         "primitive_count_exported": len(records),
         "exported_primitive_indices": [record.index for record in records],
+        "mesh_objects": mesh_objects,
         "export_scope": "static bind-pose mesh; skeleton/weights are not represented by OBJ",
         "header": asdict(header),
         "used_input_layouts": used_layouts,
@@ -527,6 +669,16 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, help="Write JSON manifest")
     parser.add_argument("--texture", type=Path, help="Optional PNG for a simple MTL")
     parser.add_argument(
+        "--mrl",
+        type=Path,
+        help="Material file. With --png-dir, writes one material per mesh group.",
+    )
+    parser.add_argument(
+        "--png-dir",
+        type=Path,
+        help="Directory of converted PNG textures referenced by --mrl.",
+    )
+    parser.add_argument(
         "--position-mode",
         choices=("bind-pose", "observed-bounds", "raw-snorm16"),
         default="bind-pose",
@@ -562,6 +714,8 @@ def main() -> int:
         args.axis_mode,
         args.texture,
         args.lod,
+        args.mrl,
+        args.png_dir,
     )
     print(
         "wrote {obj} ({vertices} vertices, {faces} faces, lod={lod}, mode={mode})".format(

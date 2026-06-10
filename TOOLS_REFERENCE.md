@@ -32,6 +32,8 @@ Responsibilities:
 - convert TEX files beside the selected MOD to PNG;
 - export bind-pose OBJ;
 - call Blender for static FBX export unless `--skip-fbx` is passed.
+- when one ARC contains multiple models, call Blender once with a batch manifest
+  instead of starting a new Blender process per model.
 
 Useful options:
 
@@ -44,6 +46,65 @@ Useful options:
 | `--skip-fbx` | Stop after PNG and OBJ output |
 | `--force` | Delete the output root before running |
 | `--dry-run` | Print planned commands without executing |
+
+## `tools\gbm_batch.py`
+
+Batch entry point for drag/drop-style folder workflows.
+
+Use it when you have an archive folder such as:
+
+```text
+E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ma
+```
+
+Export every model under that tree to OBJ plus FBX:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ma `
+  -o .\out\ma_batch
+```
+
+OBJ only:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ma `
+  -o .\out\ma_obj `
+  --format obj
+```
+
+Extract every ARC without model export:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
+  -o .\out\archive_extract `
+  --extract-only
+```
+
+Output preserves the input relative archive folders and the ARC stem. For
+example, `archive\ma\m800\m810a05_night.arc` becomes:
+
+```text
+out\ma_batch\m800\m810a05_night\
+  extracted\
+  models\
+    <model-stem>\
+      png\
+      obj\
+      fbx\
+```
+
+When FBX export is enabled, `gbm_batch.py` writes `_gbm_blender_jobs.json` and
+starts Blender once for all queued FBX jobs.
+
+Drag/drop helpers are available at the repository root:
+
+```text
+gbm_batch_export_models.bat
+gbm_extract_all_arcs.bat
+```
 
 ## `tools\gbm_arc_extract.py`
 

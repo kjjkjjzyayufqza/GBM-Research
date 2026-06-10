@@ -2,7 +2,8 @@
 """Run the GBM static extraction pipeline.
 
 This is a thin orchestrator around the focused research tools in this
-directory. It intentionally keeps format logic in the lower-level scripts.
+directory. It intentionally keeps format logic in the lower-level scripts and
+exposes the shared pipeline building blocks that gbm_batch.py reuses.
 """
 
 from __future__ import annotations
@@ -36,6 +37,21 @@ class PipelinePaths:
     preview_path: Path
     obj_path: Path
     fbx_path: Path
+
+
+@dataclass(frozen=True)
+class BlenderJob:
+    input_obj: Path
+    output_fbx: Path
+    lod: int
+    texture: Path | None = None
+    normal_texture: Path | None = None
+    mrl: Path | None = None
+    png_dir: Path | None = None
+    mod: Path | None = None
+    mfx: Path | None = None
+    preview: Path | None = None
+    report: Path | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +97,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Stop after TEX->PNG and MOD->OBJ; do not call Blender.",
     )
+    add_export_options(parser)
     parser.add_argument(
         "--force",
         action="store_true",
@@ -91,6 +108,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print commands and planned outputs without executing.",
     )
+    return parser.parse_args()
+
+
+def add_export_options(parser: argparse.ArgumentParser) -> None:
+    """Register the LOD and optional preview/report flags shared by both CLIs."""
     parser.add_argument(
         "--lod",
         type=int,
@@ -98,15 +120,27 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="LOD level for OBJ and FBX export. 0 is highest detail.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Render a preview PNG next to each FBX. Off by default.",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Write an FBX validation report JSON next to each FBX. Off by default.",
+    )
 
 
 def build_paths(
-    output_root: Path, model_stem: str, artifact_root: Path | None = None
+    output_root: Path,
+    model_stem: str,
+    artifact_root: Path | None = None,
+    png_dir: Path | None = None,
 ) -> PipelinePaths:
     extracted_dir = output_root / "extracted"
     artifact_root = artifact_root or output_root
-    png_dir = artifact_root / "png"
+    png_dir = png_dir or (artifact_root / "png")
     obj_dir = artifact_root / "obj"
     fbx_dir = artifact_root / "fbx"
     return PipelinePaths(
@@ -127,7 +161,7 @@ def build_paths(
 
 
 def run_command(command: list[str], dry_run: bool) -> None:
-    print(format_command(command))
+    print(format_command(command), flush=True)
     if dry_run:
         return
     subprocess.run(command, check=True)
@@ -223,16 +257,144 @@ def unique_model_directory_names(mod_paths: list[Path]) -> dict[Path, str]:
     return directory_names
 
 
-def choose_texture(
+def arc_extract_command(
+    arc_path: Path,
+    extracted_dir: Path,
+    manifest_path: Path,
+    limit: int | None = None,
+) -> list[str]:
+    command = [
+        sys.executable,
+        str(TOOLS_DIR / "gbm_arc_extract.py"),
+        str(arc_path),
+        "-o",
+        str(extracted_dir),
+        "--manifest",
+        str(manifest_path),
+    ]
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
+    return command
+
+
+def tex_to_png_command(
+    mod_dir: Path,
     png_dir: Path,
-    model_stem: str,
-    suffix: str,
-) -> Path | None:
-    preferred = png_dir / f"{model_stem}_{suffix}.png"
-    if preferred.exists():
-        return preferred
-    matches = sorted(png_dir.rglob(f"*_{suffix}.png"))
-    return matches[0] if matches else None
+    manifest_path: Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(TOOLS_DIR / "gbm_tex_to_png.py"),
+        str(mod_dir),
+        "-o",
+        str(png_dir),
+        "--manifest",
+        str(manifest_path),
+    ]
+
+
+def obj_probe_command(
+    mod_path: Path,
+    mfx_path: Path,
+    mrl_path: Path,
+    png_dir: Path,
+    obj_path: Path,
+    manifest_path: Path,
+    lod: int,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(TOOLS_DIR / "gbm_mod_obj_probe.py"),
+        str(mod_path),
+        "--mfx",
+        str(mfx_path),
+        "-o",
+        str(obj_path),
+        "--mrl",
+        str(mrl_path),
+        "--png-dir",
+        str(png_dir),
+        "--position-mode",
+        "bind-pose",
+        "--axis-mode",
+        "engine",
+        "--lod",
+        str(lod),
+        "--manifest",
+        str(manifest_path),
+    ]
+
+
+def blender_batch_command(blender_path: Path, manifest_path: Path) -> list[str]:
+    return [
+        str(blender_path),
+        "--background",
+        "--python",
+        str(TOOLS_DIR / "gbm_blender_convert.py"),
+        "--",
+        "--batch-manifest",
+        str(manifest_path),
+    ]
+
+
+def blender_job_record(job: BlenderJob) -> dict[str, object]:
+    return {
+        "input_obj": str(job.input_obj),
+        "output_fbx": str(job.output_fbx),
+        "texture": str(job.texture) if job.texture else None,
+        "normal_texture": str(job.normal_texture) if job.normal_texture else None,
+        "mrl": str(job.mrl) if job.mrl else None,
+        "png_dir": str(job.png_dir) if job.png_dir else None,
+        "mod": str(job.mod) if job.mod else None,
+        "mfx": str(job.mfx) if job.mfx else None,
+        "lod": job.lod,
+        "preview": str(job.preview) if job.preview else None,
+        "report": str(job.report) if job.report else None,
+    }
+
+
+def run_blender_batch(
+    output_root: Path,
+    blender_path: Path,
+    jobs: list[BlenderJob],
+    dry_run: bool = False,
+) -> None:
+    if not jobs:
+        return
+    if not dry_run and not blender_path.exists():
+        raise FileNotFoundError(
+            f"Blender executable not found: {blender_path}. "
+            "Use --blender, or skip FBX export."
+        )
+    manifest_path = output_root / "_gbm_blender_jobs.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        print(json.dumps({"planned_blender_jobs": len(jobs)}, indent=2))
+    else:
+        manifest_path.write_text(
+            json.dumps({"jobs": [blender_job_record(job) for job in jobs]}, indent=2),
+            encoding="utf-8",
+        )
+    run_command(blender_batch_command(blender_path, manifest_path), dry_run)
+
+
+def convert_model_textures(
+    png_dir: Path, mod_paths: list[Path], dry_run: bool
+) -> None:
+    """Convert each unique MOD directory's TEX into one shared png dir, once.
+
+    Every model in an ARC usually shares a single MOD directory holding all of
+    their textures. Converting per model would copy the whole texture set into
+    each model folder, so the conversion runs once per unique directory.
+    """
+    manifest_path = png_dir / "_tex_manifest.json"
+    seen: set[Path] = set()
+    for mod_path in mod_paths:
+        mod_dir = mod_path.parent
+        if mod_dir in seen:
+            continue
+        seen.add(mod_dir)
+        run_command(tex_to_png_command(mod_dir, png_dir, manifest_path), dry_run)
 
 
 def print_planned_followup_commands(
@@ -258,177 +420,109 @@ def print_planned_followup_commands(
         / "mod"
         / f"{model_stem}.mod"
     )
-    base_texture = paths.png_dir / f"{model_stem}_BM.png"
-    normal_texture = paths.png_dir / f"{model_stem}_NM.png"
+    assumed_mrl = assumed_mod.with_suffix(".mrl")
 
-    for command in (
-        [
-            sys.executable,
-            str(TOOLS_DIR / "gbm_tex_to_png.py"),
-            str(assumed_mod.parent),
-            "-o",
-            str(paths.png_dir),
-            "--manifest",
-            str(paths.tex_manifest_path),
-        ],
-        [
-            sys.executable,
-            str(TOOLS_DIR / "gbm_mod_obj_probe.py"),
-            str(assumed_mod),
-            "--mfx",
-            str(mfx_path),
-            "-o",
-            str(paths.obj_path),
-            "--texture",
-            str(base_texture),
-            "--position-mode",
-            "bind-pose",
-            "--axis-mode",
-            "engine",
-            "--lod",
-            str(lod),
-            "--manifest",
-            str(paths.obj_manifest_path),
-        ],
-    ):
-        print(format_command(command))
-
+    print(
+        format_command(
+            tex_to_png_command(assumed_mod.parent, paths.png_dir, paths.tex_manifest_path)
+        )
+    )
+    print(
+        format_command(
+            obj_probe_command(
+                assumed_mod,
+                mfx_path,
+                assumed_mrl,
+                paths.png_dir,
+                paths.obj_path,
+                paths.obj_manifest_path,
+                lod,
+            )
+        )
+    )
     if skip_fbx:
         return
-
-    blender_command = [
-        str(blender_path),
-        "--background",
-        "--python",
-        str(TOOLS_DIR / "gbm_blender_convert.py"),
-        "--",
-        "--input-obj",
-        str(paths.obj_path),
-        "--output-fbx",
-        str(paths.fbx_path),
-        "--texture",
-        str(base_texture),
-        "--normal-texture",
-        str(normal_texture),
-        "--mod",
-        str(assumed_mod),
-        "--mfx",
-        str(mfx_path),
-        "--lod",
-        str(lod),
-        "--preview",
-        str(paths.preview_path),
-        "--report",
-        str(paths.fbx_report_path),
-    ]
-    print(format_command(blender_command))
+    print(
+        format_command(
+            blender_batch_command(
+                blender_path, paths.output_root / "_gbm_blender_jobs.json"
+            )
+        )
+    )
 
 
 def run_model_pipeline(
     output_root: Path,
     mod_path: Path,
     model_directory_name: str | None,
+    png_dir: Path,
     mfx_path: Path,
-    blender_path: Path,
-    skip_fbx: bool,
     lod: int,
-) -> dict[str, str | int | None]:
+    skip_fbx: bool,
+    want_preview: bool,
+    want_report: bool,
+) -> dict[str, object]:
     model_stem = mod_path.stem
     artifact_root = (
         output_root / "models" / model_directory_name
         if model_directory_name is not None
         else output_root
     )
-    paths = build_paths(output_root, model_stem, artifact_root=artifact_root)
+    paths = build_paths(
+        output_root, model_stem, artifact_root=artifact_root, png_dir=png_dir
+    )
+
+    mrl_path = mod_path.with_suffix(".mrl")
+    if not mrl_path.exists():
+        raise FileNotFoundError(f"MRL not found for {mod_path}: {mrl_path}")
 
     run_command(
-        [
-            sys.executable,
-            str(TOOLS_DIR / "gbm_tex_to_png.py"),
-            str(mod_path.parent),
-            "-o",
-            str(paths.png_dir),
-            "--manifest",
-            str(paths.tex_manifest_path),
-        ],
+        obj_probe_command(
+            mod_path,
+            mfx_path,
+            mrl_path,
+            paths.png_dir,
+            paths.obj_path,
+            paths.obj_manifest_path,
+            lod,
+        ),
         dry_run=False,
     )
 
-    base_texture = choose_texture(paths.png_dir, model_stem, "BM")
-    normal_texture = choose_texture(paths.png_dir, model_stem, "NM")
-    if base_texture is None:
-        raise FileNotFoundError(
-            f"No base-color PNG matching {model_stem}_BM.png found in {paths.png_dir}"
-        )
-
-    obj_command = [
-        sys.executable,
-        str(TOOLS_DIR / "gbm_mod_obj_probe.py"),
-        str(mod_path),
-        "--mfx",
-        str(mfx_path),
-        "-o",
-        str(paths.obj_path),
-        "--texture",
-        str(base_texture),
-        "--position-mode",
-        "bind-pose",
-        "--axis-mode",
-        "engine",
-        "--lod",
-        str(lod),
-        "--manifest",
-        str(paths.obj_manifest_path),
-    ]
-    run_command(obj_command, dry_run=False)
-
-    result: dict[str, str | int | None] = {
+    result: dict[str, object] = {
         "model_stem": model_stem,
         "model_output_root": str(paths.artifact_root),
         "mod": str(mod_path),
+        "mrl": str(mrl_path),
         "lod": lod,
-        "base_texture": str(base_texture),
-        "normal_texture": str(normal_texture) if normal_texture else None,
         "obj": str(paths.obj_path),
         "fbx": None,
         "preview": None,
         "report": None,
     }
-
     if skip_fbx:
         return result
 
-    blender_command = [
-        str(blender_path),
-        "--background",
-        "--python",
-        str(TOOLS_DIR / "gbm_blender_convert.py"),
-        "--",
-        "--input-obj",
-        str(paths.obj_path),
-        "--output-fbx",
-        str(paths.fbx_path),
-        "--texture",
-        str(base_texture),
-        "--mod",
-        str(mod_path),
-        "--mfx",
-        str(mfx_path),
-        "--lod",
-        str(lod),
-        "--preview",
-        str(paths.preview_path),
-        "--report",
-        str(paths.fbx_report_path),
-    ]
-    if normal_texture:
-        blender_command.extend(["--normal-texture", str(normal_texture)])
-    run_command(blender_command, dry_run=False)
+    preview = paths.preview_path if want_preview else None
+    report = paths.fbx_report_path if want_report else None
     result.update(
         {
             "fbx": str(paths.fbx_path),
-            "preview": str(paths.preview_path),
-            "report": str(paths.fbx_report_path),
+            "preview": str(preview) if preview else None,
+            "report": str(report) if report else None,
+            # The converter needs the MOD for material name mapping in every
+            # case and decides skin binding itself from the MOD bone count.
+            "_blender_job": BlenderJob(
+                input_obj=paths.obj_path,
+                output_fbx=paths.fbx_path,
+                lod=lod,
+                mrl=mrl_path,
+                png_dir=paths.png_dir,
+                mod=mod_path,
+                mfx=mfx_path,
+                preview=preview,
+                report=report,
+            ),
         }
     )
     return result
@@ -453,18 +547,10 @@ def main() -> int:
     provisional_stem = args.model_stem or arc_path.stem
     paths = build_paths(output_root, provisional_stem)
 
-    extract_command = [
-        sys.executable,
-        str(TOOLS_DIR / "gbm_arc_extract.py"),
-        str(arc_path),
-        "-o",
-        str(paths.extracted_dir),
-        "--manifest",
-        str(paths.manifest_path),
-    ]
-    if args.limit is not None:
-        extract_command.extend(["--limit", str(args.limit)])
-    run_command(extract_command, args.dry_run)
+    run_command(
+        arc_extract_command(arc_path, paths.extracted_dir, paths.manifest_path, args.limit),
+        args.dry_run,
+    )
     if args.dry_run:
         print_planned_followup_commands(
             paths,
@@ -486,21 +572,34 @@ def main() -> int:
 
     manifest = load_manifest(paths.manifest_path)
     mod_paths = select_mod_paths(manifest, paths.extracted_dir, args.model_stem)
-    model_directory_names = (
-        unique_model_directory_names(mod_paths) if args.model_stem is None else {}
-    )
-    results = [
-        run_model_pipeline(
+    if args.model_stem is None:
+        model_directory_names = unique_model_directory_names(mod_paths)
+        png_dir = output_root / "models" / "png"
+    else:
+        model_directory_names = {}
+        png_dir = output_root / "png"
+    convert_model_textures(png_dir, mod_paths, dry_run=False)
+
+    results = []
+    blender_jobs: list[BlenderJob] = []
+    for mod_path in mod_paths:
+        result = run_model_pipeline(
             output_root=output_root,
             mod_path=mod_path,
             model_directory_name=model_directory_names.get(mod_path),
+            png_dir=png_dir,
             mfx_path=mfx_path,
-            blender_path=blender_path,
-            skip_fbx=args.skip_fbx,
             lod=args.lod,
+            skip_fbx=args.skip_fbx,
+            want_preview=args.preview,
+            want_report=args.report,
         )
-        for mod_path in mod_paths
-    ]
+        blender_job = result.pop("_blender_job", None)
+        if isinstance(blender_job, BlenderJob):
+            blender_jobs.append(blender_job)
+        results.append(result)
+
+    run_blender_batch(output_root, blender_path, blender_jobs)
 
     if len(results) == 1:
         result = dict(results[0])

@@ -67,6 +67,29 @@ class SelectModPathsTests(unittest.TestCase):
         self.assertIn("Multiple .mod files match", str(context.exception))
 
 
+class BlenderJobRecordTests(unittest.TestCase):
+    def test_record_serializes_optional_fields_as_null(self) -> None:
+        job = gbm_start.BlenderJob(
+            input_obj=Path("E:/out/model/obj/model.obj"),
+            output_fbx=Path("E:/out/model/fbx/model.fbx"),
+            texture=Path("E:/out/model/png/model_BM.png"),
+            normal_texture=None,
+            mod=Path("E:/out/model/extracted/model.mod"),
+            mfx=Path("E:/tools/ShaderPackage.mfx"),
+            lod=1,
+            preview=None,
+            report=None,
+        )
+
+        actual = gbm_start.blender_job_record(job)
+
+        self.assertEqual(actual["normal_texture"], None)
+        self.assertEqual(actual["preview"], None)
+        self.assertEqual(actual["report"], None)
+        self.assertEqual(actual["lod"], 1)
+        self.assertEqual(actual["input_obj"], "E:\\out\\model\\obj\\model.obj")
+
+
 class UniqueModelDirectoryNameTests(unittest.TestCase):
     def test_duplicate_stems_get_numbered_suffixes(self) -> None:
         mod_paths = [

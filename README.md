@@ -23,8 +23,9 @@ GBM DLC .arc
   -> OBJ plus PNG textures converted to static FBX with Blender
 ```
 
-The validated sample path is `ch/320900.arc` (1 mesh, 52,667 vertices, 44,867
-polygons). Animation research is deferred; LMT notes are retained as context only.
+The validated sample path is `ch/320900.arc`. The MOD stores 52,667 vertices
+across three LOD levels; the default LOD0 export is 27,461 vertices, 25,642
+polygons. Animation research is deferred; LMT notes are retained as context only.
 
 ## Table of Contents
 
@@ -33,6 +34,7 @@ polygons). Animation research is deferred; LMT notes are retained as context onl
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [One-Command Tool: `gbm_start.py`](#one-command-tool-gbm_startpy)
+- [Batch Folder Workflows](#batch-folder-workflows)
 - [Manual Stage Commands](#manual-stage-commands)
 - [Individual Tool Summary](#individual-tool-summary)
 
@@ -109,11 +111,13 @@ out/12235/
     _manifest.json
     ...
   models/
+    png/
+      _tex_manifest.json
+      chr122350_BM.png
+      chr122350_NM.png
+      chr122351_BM.png
+      ...
     chr122350/
-      png/
-        _tex_manifest.json
-        chr122350_BM.png
-        chr122350_NM.png
       obj/
         chr122350.obj
         chr122350.mtl
@@ -122,14 +126,27 @@ out/12235/
         chr122350.fbx
         chr122350_BM.png
         chr122350_NM.png
-        chr122350_preview.png
-        chr122350_fbx_report.json
     chr122351/
-      ...
+      obj/
+        ...
 ```
+
+Textures share one `models/png/` folder. Every model in an ARC usually lives in
+one MOD directory holding all textures, so a single shared folder avoids copying
+the full texture set into every model directory. Only the highest LOD is
+exported; pass `--lod 1` or `--lod 2` for lower-detail meshes.
+
+Each model's `.mrl` is read to bind one material per mesh group (HEAD, ARM, and
+so on), so a model assembled from several textured parts keeps all of its
+textures, and a variant that reuses another model's texture resolves correctly.
+See [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md).
 
 If multiple `.mod` files share the same stem, later folders are suffixed as
 `__2`, `__3`, and so on.
+
+The preview PNG and FBX report are off by default. Add `--preview` to render
+`<model>_preview.png` and `--report` to write `<model>_fbx_report.json` next to
+each FBX.
 
 **Preview without writing files:**
 
@@ -176,7 +193,8 @@ gbm_start.py
   3. exports every discovered MOD (or one MOD when `--model-stem` is provided)
   4. calls gbm_tex_to_png.py on the MOD directory
   5. calls gbm_mod_obj_probe.py
-  6. optionally calls Blender with gbm_blender_convert.py
+  6. optionally calls Blender with gbm_blender_convert.py; multi-model runs use
+     one Blender batch process
 ```
 
 Options:
@@ -190,7 +208,55 @@ Options:
 | `--limit` | no | Extract only the first N archive entries |
 | `--blender` | no | Blender executable path |
 | `--skip-fbx` | no | Stop after PNG and OBJ output |
+| `--lod` | no | LOD level for OBJ and FBX export (0, 1, 2). 0 is highest detail |
+| `--preview` | no | Render a preview PNG next to each FBX. Off by default |
+| `--report` | no | Write an FBX validation report JSON next to each FBX. Off by default |
 | `--dry-run` | no | Print planned commands and paths |
+
+## Batch Folder Workflows
+
+For drag/drop or folder-level processing, use `tools\gbm_batch.py`.
+
+Extract every ARC under a resource folder:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
+  -o .\out\archive_extract `
+  --extract-only
+```
+
+Batch export every model under a folder such as `archive\ma`:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ma `
+  -o .\out\ma_batch
+```
+
+Use `--format obj` for OBJ plus PNG only. FBX mode keeps the OBJ intermediate,
+queues all FBX conversions into `_gbm_blender_jobs.json`, and starts Blender
+once for the whole batch. Like `gbm_start.py`, the preview PNG and FBX report
+are off by default; add `--preview` and `--report` to emit them. `--lod`
+selects the export LOD.
+
+Drag/drop helpers:
+
+```text
+gbm_extract_all_arcs.bat
+gbm_batch_export_models.bat
+```
+
+The output layout preserves the input relative folder and ARC stem. For example,
+`archive\ma\m800\m810a05_night.arc` exports below:
+
+```text
+out\ma_batch\m800\m810a05_night\models\
+  png\                     <- one shared texture folder per ARC
+  <model-stem>\
+    obj\
+    fbx\
+```
 
 ## Manual Stage Commands
 
@@ -251,12 +317,14 @@ static extraction milestone.
 | Tool | Purpose | Main output |
 |---|---|---|
 | `tools/gbm_start.py` | Orchestrates the stable static pipeline | output directory tree |
+| `tools/gbm_batch.py` | Batch extracts ARC folders or exports all models under a folder tree | per-ARC model folders |
 | `tools/gbm_arc_extract.py` | Decrypts/decompresses ARCC v8 archives | extracted native resources |
 | `tools/gbm_tex_to_png.py` | Converts TEX v10 textures | PNG files |
-| `tools/gbm_mod_obj_probe.py` | Exports MOD v7 bind-pose geometry | OBJ, MTL, manifest |
+| `tools/gbm_mod_obj_probe.py` | Exports MOD v7 bind-pose geometry, one material per mesh group | OBJ, multi-material MTL, manifest |
 | `tools/gbm_blender_convert.py` | Converts OBJ/PNG to static FBX in Blender | FBX, preview, report |
 | `tools/gbm_mod_inspect.py` | Inspects MOD structure | JSON report |
 | `tools/gbm_mfx_inspect.py` | Inspects MFX input layouts | JSON report |
+| `tools/gbm_mrl_inspect.py` | Resolves MRL material-to-texture bindings | JSON report |
 | `tools/gbm_lmt_inspect.py` | Inspects deferred LMT motion files | JSON report |
 | `tools/gbm_equip_lookup.py` | Looks up serial names such as `RX-78-2` | `model_id` and matching `ch/*.arc` variants |
 
@@ -271,8 +339,11 @@ GBM-Research/
   README.md
   LICENSE
   .gitignore
+  gbm_batch_export_models.bat
+  gbm_extract_all_arcs.bat
   tools/
     gbm_start.py             # one-command static pipeline orchestrator
+    gbm_batch.py             # folder-level batch extraction/export
     gbm_arc_extract.py       # ARCC v8 extraction
     gbm_tex_to_png.py        # TEX v10 to PNG conversion
     gbm_mod_obj_probe.py     # MOD v7 bind-pose OBJ export

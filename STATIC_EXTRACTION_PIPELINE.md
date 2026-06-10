@@ -28,7 +28,9 @@ python .\tools\gbm_start.py `
 ```
 
 Use `--skip-fbx` when Blender is not available. Use `--dry-run` to print the
-planned commands without executing them.
+planned commands without executing them. The preview PNG and FBX report shown
+in the manual Step 4 below are off by default here; add `--preview` and
+`--report` to emit them.
 
 When `--model-stem` is omitted, every discovered `.mod` is exported under
 `out\<arc-stem>\models\<unique-model-name>\...`. If multiple `.mod` files share
@@ -84,6 +86,10 @@ python .\tools\gbm_mod_obj_probe.py `
   --manifest .\out\320900\obj\ma320900_obj_manifest.json
 ```
 
+`--texture` writes a single-material MTL. For full per-mesh-group materials,
+pass `--mrl <model>.mrl --png-dir <png folder>` instead; the orchestrators do
+this automatically. See [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md).
+
 ## Step 4: Export Static FBX
 
 Run through Blender 4.2:
@@ -111,14 +117,14 @@ FBX export keeps the top-level hierarchy flat as `<model>` and optional
 out\320900\fbx\ma320900.fbx
 out\320900\fbx\ma320900_BM.png
 out\320900\fbx\ma320900_NM.png
-out\320900\fbx\ma320900_preview.png
-out\320900\fbx\ma320900_fbx_report.json
+out\320900\fbx\ma320900_preview.png    (only with --preview)
+out\320900\fbx\ma320900_fbx_report.json (only with --report)
 ```
 
-The report should show matching source and re-imported FBX topology:
+The report should show matching source and re-imported FBX topology. The MOD
+stores three LOD levels (52,667 vertices total); the default LOD0 export is:
 
 ```text
-vertices = 52,667
-polygons = 44,867
-loops    = 134,601
+vertices = 27,461
+polygons = 25,642
 ```

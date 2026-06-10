@@ -203,6 +203,15 @@ def parse_primitive_record(
     )
 
 
+def read_material_names(data: bytes, header: ModHeader) -> list[str]:
+    """Read the MOD material name table (0x80 bytes per name)."""
+    names: list[str] = []
+    for index in range(header.material_name_count):
+        start = header.material_name_offset + index * 0x80
+        names.append(data[start : start + 0x80].split(b"\x00", 1)[0].decode("ascii"))
+    return names
+
+
 def parse_primitive_records(data: bytes, header: ModHeader) -> list[PrimitiveRecord]:
     records: list[PrimitiveRecord] = []
     table_bytes = header.primitive_count * PRIMITIVE_RECORD_SIZE
@@ -381,6 +390,7 @@ def inspect_mod(path: Path) -> dict[str, Any]:
 
     report: dict[str, Any] = {
         "header": asdict(header),
+        "material_names": read_material_names(data, header),
         "section_layout": build_section_layout(data, header),
         "primitive_record_size": PRIMITIVE_RECORD_SIZE,
         "summary": summarize_records(data, header, primitive_records),
