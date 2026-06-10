@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - LMT entry in the format catalog.
+- [TOOLS_REFERENCE.md#toolsgbm_lmt_inspectpy](TOOLS_REFERENCE.md#toolsgbm_lmt_inspectpy) - LMT inspection tool notes.
+
 ## Scope Decision
 
 LMT animation is not part of the current extraction milestone. The immediate

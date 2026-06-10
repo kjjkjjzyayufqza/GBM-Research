@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md) - per-tool command reference.
+- [VALIDATION_320900.md](VALIDATION_320900.md) - validated sample output and checks.
+
 This is the currently validated path from a GBM character archive to static FBX
 and PNG textures. Prefer the one-command entry point for normal use, and use
 the manual steps only when debugging a stage.

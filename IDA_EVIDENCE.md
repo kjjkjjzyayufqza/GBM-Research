@@ -4,6 +4,12 @@ Last updated: 2026-06-07
 
 These addresses are anchors in `libGUNS.so` used to confirm format behavior.
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - formats supported by the evidence below.
+- [GBM_ARC_RESEARCH.md](GBM_ARC_RESEARCH.md) - historical research log that cites these anchors.
+
 | Address | Symbol / area | Finding |
 |---:|---|---|
 | `0x1be6bc0` | `rTexture::load` | TEX v10 loader and format dispatch |

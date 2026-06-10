@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -92,6 +93,30 @@ class BlenderJobRecordTests(unittest.TestCase):
         self.assertEqual(actual["report"], None)
         self.assertEqual(actual["lod"], 1)
         self.assertEqual(actual["input_obj"], "E:\\out\\model\\obj\\model.obj")
+
+
+class RunCommandTests(unittest.TestCase):
+    def test_run_command_kills_child_process_on_keyboard_interrupt(self) -> None:
+        class FakeProcess:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.returncode = None
+                self.killed = False
+                fake_processes.append(self)
+
+            def wait(self) -> int:
+                raise KeyboardInterrupt
+
+            def kill(self) -> None:
+                self.killed = True
+
+        fake_processes: list[FakeProcess] = []
+
+        with mock.patch.object(gbm_start.subprocess, "Popen", FakeProcess):
+            with self.assertRaises(KeyboardInterrupt):
+                gbm_start.run_command(["fake-tool"], dry_run=False)
+
+        self.assertEqual(len(fake_processes), 1)
+        self.assertTrue(fake_processes[0].killed)
 
 
 class UniqueModelDirectoryNameTests(unittest.TestCase):

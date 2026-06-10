@@ -234,6 +234,14 @@ python .\tools\gbm_batch.py `
   -o .\out\ma_batch
 ```
 
+Batch export every character model archive under `archive\ch`:
+
+```powershell
+python .\tools\gbm_batch.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch `
+  -o .\out\ch_models
+```
+
 Use `--format obj` for OBJ plus PNG only. FBX mode keeps the OBJ intermediate,
 queues all FBX conversions into `_gbm_blender_jobs.json`, and starts Blender
 once for the whole batch. Like `gbm_start.py`, the preview PNG and FBX report
@@ -244,7 +252,7 @@ Drag/drop helpers:
 
 ```text
 gbm_extract_all_arcs.bat
-gbm_batch_export_models.bat
+gbm_batch_export_models.bat  <- with no args, defaults to archive\ch
 ```
 
 The output layout preserves the input relative folder and ARC stem. For example,
@@ -318,6 +326,9 @@ static extraction milestone.
 |---|---|---|
 | `tools/gbm_start.py` | Orchestrates the stable static pipeline | output directory tree |
 | `tools/gbm_batch.py` | Batch extracts ARC folders or exports all models under a folder tree | per-ARC model folders |
+| `tools/gbm_lookup_export.py` | CSV-driven named model/weapon export backend | clean serial-name folders |
+| `tools/gbm_export_models_obj.py` / `tools/gbm_export_models_fbx.py` | Export body models from `gbm_archive_lookup_index.csv` | `model\<serial_name>` |
+| `tools/gbm_export_weapons_obj.py` / `tools/gbm_export_weapons_fbx.py` | Export weapons/shields from `gbm_weapon_parts_index.csv` | `weapon\<serial_name>` |
 | `tools/gbm_arc_extract.py` | Decrypts/decompresses ARCC v8 archives | extracted native resources |
 | `tools/gbm_tex_to_png.py` | Converts TEX v10 textures | PNG files |
 | `tools/gbm_mod_obj_probe.py` | Exports MOD v7 bind-pose geometry, one material per mesh group | OBJ, multi-material MTL, manifest |
@@ -354,6 +365,7 @@ GBM-Research/
     gbm_equip_lookup.py      # serial_name/model_id lookup for ch archives
     gbm_archive_lookup_index.csv # body serial_name -> model_id index
     gbm_equip_parts_index.csv    # body part-level equip table index
+    gbm_weapon_parts_index.csv   # weapon/shield part-level equip table index
     ShaderPackage.mfx        # required for MOD vertex layout decoding
   STATUS_STATIC_EXTRACTION.md
   STATIC_EXTRACTION_PIPELINE.md
@@ -420,6 +432,40 @@ See [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) for finding numeric
 `tools/gbm_archive_lookup_index.csv`. The lookup CSV rows follow the source
 order from `table_body.etb`; they are not alphabetically sorted by
 `serial_name`.
+
+## Named Lookup Export
+
+Use these scripts when you want CSV-driven output named by `serial_name` instead
+of raw archive ids. They read `tools/gbm_archive_lookup_index.csv` for body
+models and `tools/gbm_weapon_parts_index.csv` for weapons/shields, skip `_mot`
+and `_vfx` archives, and write clean final folders under
+`out\lookup_exports\model\<safe_serial_name>\` or
+`out\lookup_exports\weapon\<safe_serial_name>\`.
+
+```powershell
+python .\tools\gbm_export_models_obj.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
+  --serial RX-78-2
+
+python .\tools\gbm_export_models_fbx.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
+  --serial RX-78-2
+
+python .\tools\gbm_export_weapons_obj.py `
+  E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
+  --serial RX-78-2
+```
+
+Omit `--serial` to export every unique archive row in the selected CSV. Final
+output keeps only `.obj`, `.mtl`, `.fbx`, and `.png`; temporary extracted
+`.mod`, `.mrl`, `.tex`, and JSON manifests are deleted unless `--keep-work` is
+passed. `.mtl` is kept because OBJ files reference it for material/texture
+bindings. When multiple archive rows share the same `serial_name`, later rows
+use stable suffixes such as `RX-78-2_1`, `RX-78-2_2` so full CSV exports do not
+overwrite or merge unrelated model sets. Normal runs show a compact progress
+line per archive; pass `--verbose` to print full planned entries and child tool
+commands. Archive exports run with `--workers 3` by default; lower it to
+`--workers 1` for strictly ordered, single-process debugging.
 
 ## Extraction Pipeline Architecture
 
@@ -504,7 +550,9 @@ Key documents:
 | Model format | [MOD_V7_MODEL.md](MOD_V7_MODEL.md) |
 | Materials and shader layouts | [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md) |
 | Format catalog | [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) |
+| DLC archive directory meanings | [RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories](RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories) |
 | Resource name mapping | [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) |
+| Tool reference | [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md) |
 | Validation sample | [VALIDATION_320900.md](VALIDATION_320900.md) |
 | Native reverse engineering anchors | [IDA_EVIDENCE.md](IDA_EVIDENCE.md) |
 | Deferred animation notes | [LMT_ANIMATION_DEFERRED.md](LMT_ANIMATION_DEFERRED.md) |

@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - broader format catalog and DLC archive directory meanings.
+- [TOOLS_REFERENCE.md#toolsgbm_arc_extractpy](TOOLS_REFERENCE.md#toolsgbm_arc_extractpy) - extractor command reference.
+
 ## Summary
 
 GBM DLC archives use an encrypted MT-style archive container:

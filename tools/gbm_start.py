@@ -164,7 +164,25 @@ def run_command(command: list[str], dry_run: bool) -> None:
     print(format_command(command), flush=True)
     if dry_run:
         return
-    subprocess.run(command, check=True)
+    process = subprocess.Popen(command)
+    try:
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        try:
+            process.kill()
+        finally:
+            try:
+                process.wait(timeout=5)
+            except TypeError:
+                try:
+                    process.wait()
+                except KeyboardInterrupt:
+                    pass
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        raise
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
 
 
 def format_command(command: list[str]) -> str:

@@ -6,6 +6,12 @@ GBM does have a local list-like mapping, but it is not a friendly text file in
 the DLC `archive/ch` directory. The useful mapping lives in the APK-side
 native tables:
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories](RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories) - meaning of `archive/ch`, `archive/ma`, `archive/we`, and other DLC folders.
+- [TOOLS_REFERENCE.md#toolsgbm_equip_lookuppy](TOOLS_REFERENCE.md#toolsgbm_equip_lookuppy) - command reference for regenerating lookup CSVs.
+
 ```text
 gundam-breaker-mobile-4-01-03/assets/nativeAndroid/tuning/equip/
   table_head.eth
@@ -42,6 +48,9 @@ serial_name / unit code
 The `ch` archive file name is numeric because it is keyed by `model_id`, not by
 the human-facing unit name.
 
+For the broader meaning of DLC archive directories such as `ch`, `ma`, `mi`,
+`we`, and `ex`, see [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories).
+
 ## Lookup CSVs
 
 Start with the CSV files in `tools/`:
@@ -49,6 +58,7 @@ Start with the CSV files in `tools/`:
 ```text
 tools/gbm_archive_lookup_index.csv
 tools/gbm_equip_parts_index.csv
+tools/gbm_weapon_parts_index.csv
 ```
 
 `gbm_archive_lookup_index.csv` is the human-readable first stop for mobile suit
@@ -70,12 +80,17 @@ serial_name, gunpla_id, model_id, part_type, parts_id, parts_name_id,
 table_file, has_ch_archive, ch_archives
 ```
 
+`gbm_weapon_parts_index.csv` is the matching weapon/shield part-level index. It
+is generated from `table_long_weapon.etwl`, `table_short_weapon.etws`, and
+`table_shield.ets`. It is ordered by source table and original record offset,
+not alphabetically by `serial_name`.
+
 For a normal human lookup, open `gbm_archive_lookup_index.csv` and filter
 `serial_name`.
 
-Both CSV files keep the source unit ordering from `table_body.etb`; they are
-not alphabetically sorted by `serial_name`. Rows that do not have a matching
-body-table unit fall back to their source table order.
+The body CSV files keep the source unit ordering from `table_body.etb`; they
+are not alphabetically sorted by `serial_name`. Rows that do not have a
+matching body-table unit fall back to numeric/source-table order.
 
 ## Lookup Tool
 

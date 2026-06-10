@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) - how serial names map to `ch/*.arc` archives and lookup CSVs.
+- [RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories](RESOURCE_FORMAT_CATALOG.md#dlc-archive-directories) - meaning of DLC archive folders.
+
 ## `tools\gbm_start.py`
 
 Runs the current static pipeline by invoking the focused tools in order:
@@ -128,13 +134,14 @@ The simpler day-to-day lookup path is to open these generated CSV files:
 ```text
 tools\gbm_archive_lookup_index.csv
 tools\gbm_equip_parts_index.csv
+tools\gbm_weapon_parts_index.csv
 ```
 
-These CSVs preserve the source unit order from `table_body.etb` instead of
-sorting `serial_name` alphabetically. By default the generated CSVs are mobile
-suit body indexes only: head, body, arms, legs, and backpack. Weapon and shield
-rows stay available through direct lookup and can be included in generated CSVs
-only with `--include-non-suit-parts`.
+The body CSVs preserve the source unit order from `table_body.etb` instead of
+sorting `serial_name` alphabetically. By default the generated body CSVs contain
+head, body, arms, legs, and backpack. Weapon and shield rows are written to
+`gbm_weapon_parts_index.csv`, ordered by source table and original record
+offset.
 
 Example:
 

@@ -75,8 +75,8 @@ class BlenderConvertIntegrationTests(unittest.TestCase):
                     "bake_space_transform": False,
                     "axis_forward": "Z",
                     "axis_up": "Y",
-                    "primary_bone_axis": "-X",
-                    "secondary_bone_axis": "Y",
+                    "primary_bone_axis": "Y",
+                    "secondary_bone_axis": "X",
                 },
             )
             self.assertEqual(report_data["fbx_roundtrip"]["helper_root_empties"], [])

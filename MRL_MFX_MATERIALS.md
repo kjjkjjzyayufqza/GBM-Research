@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-10
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [MOD_V7_MODEL.md](MOD_V7_MODEL.md) - model format context that consumes MRL/MFX data.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - format catalog entries for MRL and MFX.
+
 ## Role in the Static Pipeline
 
 The exporter binds one Blender material per mesh group, driven by the MRL:

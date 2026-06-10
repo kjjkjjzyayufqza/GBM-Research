@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [STATUS_STATIC_EXTRACTION.md](STATUS_STATIC_EXTRACTION.md) - current extraction status.
+- [STATIC_EXTRACTION_PIPELINE.md](STATIC_EXTRACTION_PIPELINE.md) - commands used by the validation path.
+
 ## Source Archive
 
 ```text

@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - TEX entry in the format catalog.
+- [TOOLS_REFERENCE.md#toolsgbm_tex_to_pngpy](TOOLS_REFERENCE.md#toolsgbm_tex_to_pngpy) - texture conversion command reference.
+
 ## Current Support
 
 `tools\gbm_tex_to_png.py` converts the TEX files required for the current

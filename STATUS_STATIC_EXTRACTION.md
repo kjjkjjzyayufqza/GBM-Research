@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [STATIC_EXTRACTION_PIPELINE.md](STATIC_EXTRACTION_PIPELINE.md) - current command sequence.
+- [VALIDATION_320900.md](VALIDATION_320900.md) - validation sample details.
+
 ## Scope
 
 The current phase targets static model and texture extraction from GBM game

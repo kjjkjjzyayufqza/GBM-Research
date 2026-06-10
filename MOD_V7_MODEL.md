@@ -2,6 +2,12 @@
 
 Last updated: 2026-06-07
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md) - material and shader context used with MOD.
+- [TOOLS_REFERENCE.md#toolsgbm_mod_obj_probepy](TOOLS_REFERENCE.md#toolsgbm_mod_obj_probepy) - MOD OBJ exporter command reference.
+
 ## Current Support
 
 `tools\gbm_mod_obj_probe.py` exports a static bind-pose OBJ from the GBM MOD v7

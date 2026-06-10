@@ -4,6 +4,12 @@ Last updated: 2026-06-07
 
 Workspace: `E:\research\Gundam_Breaker_Mobile`
 
+Related docs:
+
+- [README.md](README.md) - project entry point and key document index.
+- [RESOURCE_FORMAT_CATALOG.md](RESOURCE_FORMAT_CATALOG.md) - current concise format catalog.
+- [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md) - human name to archive lookup notes.
+
 ## Objective
 
 The project goal is a reproducible extraction pipeline for Gundam Breaker

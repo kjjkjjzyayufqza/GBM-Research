@@ -20,9 +20,26 @@ DEFAULT_ARCHIVE_ROOT = (
 )
 DEFAULT_ARCHIVE_INDEX = REPO_ROOT / "tools" / "gbm_archive_lookup_index.csv"
 DEFAULT_PARTS_INDEX = REPO_ROOT / "tools" / "gbm_equip_parts_index.csv"
+DEFAULT_WEAPON_PARTS_INDEX = REPO_ROOT / "tools" / "gbm_weapon_parts_index.csv"
 
 VALUE_MARKER = b"\x01\x00\x00\x00"
+EQUIP_TABLE_ORDER = (
+    "table_head.eth",
+    "table_body.etb",
+    "table_arms.eta",
+    "table_leg.etl",
+    "table_backpack.etbp",
+    "table_long_weapon.etwl",
+    "table_shield.ets",
+    "table_short_weapon.etws",
+)
 SUIT_PART_TYPES = frozenset({0, 1, 2, 3, 4})
+WEAPON_TABLE_ORDER = (
+    "table_long_weapon.etwl",
+    "table_shield.ets",
+    "table_short_weapon.etws",
+)
+WEAPON_TABLES = frozenset(WEAPON_TABLE_ORDER)
 
 PART_TYPE_NAMES = {
     0: "head",
@@ -95,6 +112,10 @@ def archive_variants(archive_root: Path, model_id: int) -> list[str]:
 
 def is_suit_part(match: EquipMatch) -> bool:
     return match.parts_type in SUIT_PART_TYPES
+
+
+def is_weapon_part(match: EquipMatch) -> bool:
+    return match.table in WEAPON_TABLES
 
 
 def scan_table(
@@ -212,7 +233,12 @@ def scan_equip_tables(
         raise FileNotFoundError(f"equip table directory not found: {equip_dir}")
 
     matches: list[EquipMatch] = []
-    for table in sorted(equip_dir.glob("table_*.*")):
+    by_name = {table.name: table for table in equip_dir.glob("table_*.*")}
+    for table_name in EQUIP_TABLE_ORDER:
+        table = by_name.pop(table_name, None)
+        if table is not None:
+            matches.extend(scan_table(table, query, archive_root, exact))
+    for table in by_name.values():
         matches.extend(scan_table(table, query, archive_root, exact))
     return matches
 
@@ -235,12 +261,32 @@ def ordered_matches(matches: list[EquipMatch]) -> list[EquipMatch]:
         matches,
         key=lambda item: (
             order.get((item.serial_name, item.gunpla_id), 1_000_000),
-            item.serial_name,
             item.gunpla_id,
             item.model_id,
             item.parts_type,
-            item.parts_id,
             item.table,
+            item.offset,
+            item.parts_id,
+        ),
+    )
+
+
+def table_order_index(table: str) -> int:
+    try:
+        return EQUIP_TABLE_ORDER.index(table)
+    except ValueError:
+        return len(EQUIP_TABLE_ORDER)
+
+
+def source_ordered_matches(matches: list[EquipMatch]) -> list[EquipMatch]:
+    return sorted(
+        matches,
+        key=lambda item: (
+            table_order_index(item.table),
+            item.offset,
+            item.gunpla_id,
+            item.model_id,
+            item.parts_id,
         ),
     )
 
@@ -293,14 +339,17 @@ def archive_index_rows(matches: list[EquipMatch]) -> list[ArchiveIndexRow]:
         rows,
         key=lambda item: (
             order.get((item.serial_name, item.gunpla_id), 1_000_000),
-            item.serial_name,
             item.gunpla_id,
             item.model_id,
         ),
     )
 
 
-def write_parts_index(path: Path, matches: list[EquipMatch]) -> None:
+def write_parts_index(
+    path: Path,
+    matches: list[EquipMatch],
+    source_order: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -318,7 +367,10 @@ def write_parts_index(path: Path, matches: list[EquipMatch]) -> None:
             ],
         )
         writer.writeheader()
-        for match in ordered_matches(matches):
+        sorted_matches = (
+            source_ordered_matches(matches) if source_order else ordered_matches(matches)
+        )
+        for match in sorted_matches:
             writer.writerow(
                 {
                     "serial_name": match.serial_name,
@@ -361,16 +413,19 @@ def write_indexes(
     archive_root: Path,
     archive_index: Path,
     parts_index: Path,
+    weapon_parts_index: Path,
     include_non_suit_parts: bool,
-) -> tuple[list[ArchiveIndexRow], list[EquipMatch]]:
+) -> tuple[list[ArchiveIndexRow], list[EquipMatch], list[EquipMatch]]:
     matches = scan_equip_tables(native_android, archive_root)
+    weapon_matches = [match for match in matches if is_weapon_part(match)]
     if not include_non_suit_parts:
         matches = [match for match in matches if is_suit_part(match)]
 
     rows = archive_index_rows(matches)
     write_archive_index(archive_index, rows)
     write_parts_index(parts_index, matches)
-    return rows, matches
+    write_parts_index(weapon_parts_index, weapon_matches, source_order=True)
+    return rows, matches, weapon_matches
 
 
 def print_summary(matches: list[EquipMatch]) -> None:
@@ -460,19 +515,30 @@ def main() -> int:
         default=DEFAULT_PARTS_INDEX,
         help=f"Part index CSV path. Defaults to {DEFAULT_PARTS_INDEX}.",
     )
+    parser.add_argument(
+        "--weapon-parts-index",
+        type=Path,
+        default=DEFAULT_WEAPON_PARTS_INDEX,
+        help=(
+            "Weapon/shield part index CSV path. Defaults to "
+            f"{DEFAULT_WEAPON_PARTS_INDEX}."
+        ),
+    )
     args = parser.parse_args()
 
     if args.write_indexes:
-        archive_rows, part_rows = write_indexes(
+        archive_rows, part_rows, weapon_rows = write_indexes(
             args.native_android.resolve(),
             args.archive_root.resolve(),
             args.archive_index.resolve(),
             args.parts_index.resolve(),
+            args.weapon_parts_index.resolve(),
             args.include_non_suit_parts,
         )
         print(
             f"wrote {len(archive_rows)} archive rows to {args.archive_index} "
-            f"and {len(part_rows)} part rows to {args.parts_index}"
+            f"and {len(part_rows)} part rows to {args.parts_index}; "
+            f"wrote {len(weapon_rows)} weapon rows to {args.weapon_parts_index}"
         )
         return 0
 
