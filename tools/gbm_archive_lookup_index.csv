@@ -593,15 +593,15 @@ RX-93ff,12574,12574,head; body; arms; legs; backpack,10,ch/12574.arc,yes,ch/1257
 NO-DATA,12575,12575,head; body; arms; legs; backpack,10,ch/12575.arc,yes,ch/12575.arc; ch/12575_mot.arc; ch/12575_vfx.arc,table_arms.eta; table_backpack.etbp; table_body.etb; table_head.eth; table_leg.etl
 XVX-016,12576,12576,head; body; arms; legs; backpack,10,ch/12576.arc,yes,ch/12576.arc; ch/12576_mot.arc; ch/12576_vfx.arc,table_arms.eta; table_backpack.etbp; table_body.etb; table_head.eth; table_leg.etl
 MD-0064,12577,12577,head; body; arms; legs; backpack,10,ch/12577.arc,yes,ch/12577.arc; ch/12577_mot.arc; ch/12577_vfx.arc,table_arms.eta; table_backpack.etbp; table_body.etb; table_head.eth; table_leg.etl
-<REPT 11>,12391,12391,head,1,ch/12391.arc,yes,ch/12391.arc; ch/12391_mot.arc; ch/12391_vfx.arc,table_head.eth
-<REPT 5>,10704,10704,head; legs,2,ch/10704.arc,yes,ch/10704.arc; ch/10704_mot.arc; ch/10704_vfx.arc,table_head.eth; table_leg.etl
-GH-001RB,12462,12462,backpack,1,ch/12462.arc,yes,ch/12462.arc; ch/12462_mot.arc; ch/12462_vfx.arc,table_backpack.etbp
-Gundam Artemis,12277,12277,backpack,1,ch/12277.arc,yes,ch/12277.arc; ch/12277_mot.arc; ch/12277_vfx.arc,table_backpack.etbp
 MS-06J,10015,10015,legs,1,ch/10015.arc,yes,ch/10015.arc; ch/10015_vfx.arc,table_leg.etl
-RGM-237C,12005,12005,backpack,2,ch/12005.arc,yes,ch/12005.arc; ch/12005_mot.arc; ch/12005_vfx.arc,table_backpack.etbp
-RMS-154,12249,12249,head,1,ch/12249.arc,yes,ch/12249.arc; ch/12249_vfx.arc,table_head.eth
 RX-178,10101,10101,head,1,ch/10101.arc,yes,ch/10101.arc; ch/10101_vfx.arc,table_head.eth
 RX-178,10103,10103,head,1,ch/10103.arc,yes,ch/10103.arc; ch/10103_vfx.arc,table_head.eth
+<REPT 5>,10704,10704,head; legs,2,ch/10704.arc,yes,ch/10704.arc; ch/10704_mot.arc; ch/10704_vfx.arc,table_head.eth; table_leg.etl
+RGM-237C,12005,12005,backpack,2,ch/12005.arc,yes,ch/12005.arc; ch/12005_mot.arc; ch/12005_vfx.arc,table_backpack.etbp
 VGMM-Git01,12223,12223,legs,1,ch/12223.arc,yes,ch/12223.arc; ch/12223_mot.arc; ch/12223_vfx.arc,table_leg.etl
+RMS-154,12249,12249,head,1,ch/12249.arc,yes,ch/12249.arc; ch/12249_vfx.arc,table_head.eth
+Gundam Artemis,12277,12277,backpack,1,ch/12277.arc,yes,ch/12277.arc; ch/12277_mot.arc; ch/12277_vfx.arc,table_backpack.etbp
 XM-X1,12310,12310,arms,1,ch/12310.arc,yes,ch/12310.arc; ch/12310_mot.arc; ch/12310_vfx.arc,table_arms.eta
+<REPT 11>,12391,12391,head,1,ch/12391.arc,yes,ch/12391.arc; ch/12391_mot.arc; ch/12391_vfx.arc,table_head.eth
 ZGMF-1017,12434,12434,legs,2,ch/12434.arc,yes,ch/12434.arc; ch/12434_mot.arc; ch/12434_vfx.arc,table_leg.etl
+GH-001RB,12462,12462,backpack,1,ch/12462.arc,yes,ch/12462.arc; ch/12462_mot.arc; ch/12462_vfx.arc,table_backpack.etbp

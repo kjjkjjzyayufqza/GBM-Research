@@ -139,5 +139,23 @@ class UniqueModelDirectoryNameTests(unittest.TestCase):
         )
 
 
+class TextureSourceDirsTests(unittest.TestCase):
+    def test_includes_sibling_texture_dirs_without_mod_files(self) -> None:
+        root = Path("E:/tmp/out/extracted")
+        exported_mod = root / "character" / "chr106009" / "mod" / "chr106003_01.mod"
+        sibling_tex = root / "character" / "chr211112" / "mod" / "chr211112_P00_BM.tex"
+
+        with mock.patch.object(Path, "rglob", return_value=[sibling_tex]):
+            actual = gbm_start.texture_source_dirs([exported_mod], root)
+
+        self.assertEqual(
+            actual,
+            [
+                root / "character" / "chr106009" / "mod",
+                root / "character" / "chr211112" / "mod",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

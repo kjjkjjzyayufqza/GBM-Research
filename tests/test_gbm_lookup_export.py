@@ -2,12 +2,18 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from unittest import mock
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "gbm_lookup_export.py"
 TOOLS_DIR = MODULE_PATH.parent
+WORKSPACE_ROOT = MODULE_PATH.parents[2]
+REAL_ARCHIVE_ROOT = (
+    WORKSPACE_ROOT / "com.bandainamcoent.gb_jp" / "files" / "dlc" / "archive"
+)
+REAL_WEAPON_CSV = TOOLS_DIR / "gbm_weapon_parts_index.csv"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 SPEC = importlib.util.spec_from_file_location("gbm_lookup_export", MODULE_PATH)
@@ -40,14 +46,76 @@ class LookupExportTests(unittest.TestCase):
 
         self.assertEqual(actual, ["ch/10000.arc"])
 
-    def test_row_archive_refs_weapon_uses_ch_archives_and_skips_vfx_mot(self) -> None:
+    def test_row_archive_refs_weapon_uses_ch_archives_for_mesh_export(self) -> None:
         row = {
-            "ch_archives": "ch/10100.arc; ch/10100_vfx.arc; ch/10100_mot.arc",
+            "parts_id": "31000001",
+            "ch_archives": "ch/10100.arc; ch/10100_vfx.arc",
+            "we_archives": "we/31000001.arc",
         }
 
         actual = gbm_lookup_export.row_archive_refs(row, "weapon")
 
         self.assertEqual(actual, ["ch/10100.arc"])
+
+    def test_row_archive_refs_weapon_skips_rows_without_ch_archive(self) -> None:
+        row = {
+            "parts_id": "31000001",
+            "ch_archives": "",
+            "we_archives": "we/31000001.arc",
+        }
+
+        actual = gbm_lookup_export.row_archive_refs(row, "weapon")
+
+        self.assertEqual(actual, [])
+
+    def test_row_archive_refs_weapon_ignores_we_only_rows(self) -> None:
+        row = {
+            "parts_id": "31003603",
+            "has_ch_archive": "no",
+            "ch_archives": "",
+            "has_we_archive": "yes",
+            "we_archives": "we/31003603.arc",
+        }
+
+        actual = gbm_lookup_export.row_archive_refs(row, "weapon")
+
+        self.assertEqual(actual, [])
+
+    @unittest.skipUnless(
+        REAL_ARCHIVE_ROOT.joinpath("ch", "10100.arc").is_file(),
+        "requires local game archive at com.bandainamcoent.gb_jp/files/dlc/archive",
+    )
+    def test_read_weapon_entries_from_real_csv_uses_ch_archives(self) -> None:
+        entries = gbm_lookup_export.read_lookup_entries(
+            csv_path=REAL_WEAPON_CSV,
+            archive_root=REAL_ARCHIVE_ROOT,
+            kind="weapon",
+            serial_filters=["RX-78-2"],
+            limit=3,
+        )
+
+        self.assertGreater(len(entries), 0)
+        for entry in entries:
+            self.assertTrue(
+                entry.archive_ref.startswith("ch/"),
+                f"expected ch archive, got {entry.archive_ref}",
+            )
+            self.assertTrue(entry.archive_path.is_file(), entry.archive_path)
+
+    @unittest.skipUnless(
+        REAL_ARCHIVE_ROOT.joinpath("we", "31001402.arc").is_file(),
+        "requires local game archive at com.bandainamcoent.gb_jp/files/dlc/archive",
+    )
+    def test_read_weapon_entries_without_ch_archive_are_skipped(self) -> None:
+        entries = gbm_lookup_export.read_lookup_entries(
+            csv_path=REAL_WEAPON_CSV,
+            archive_root=REAL_ARCHIVE_ROOT,
+            kind="weapon",
+            serial_filters=["MS-06"],
+            limit=10,
+        )
+
+        self.assertFalse(any(entry.archive_ref == "we/31001402.arc" for entry in entries))
 
     def test_read_lookup_entries_dedupes_serial_archive_pairs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,6 +237,225 @@ class LookupExportTests(unittest.TestCase):
                 "obj/model.obj",
             ],
         )
+
+    def test_run_materializes_each_sequential_entry_before_starting_next_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_root = root / "final"
+            work_dir = root / "work"
+            archive_root = root / "archive"
+            mfx_path = root / "ShaderPackage.mfx"
+            mfx_path.write_bytes(b"MFX")
+            first_archive = archive_root / "ch" / "10300.arc"
+            second_archive = archive_root / "ch" / "10301.arc"
+            first_archive.parent.mkdir(parents=True)
+            first_archive.write_bytes(b"ARCC")
+            second_archive.write_bytes(b"ARCC")
+            entries = [
+                gbm_lookup_export.LookupExportEntry(
+                    serial_name="RX-79(G)-1",
+                    safe_serial_name="RX-79_G_1",
+                    output_name="RX-79_G_1",
+                    archive_ref="ch/10300.arc",
+                    archive_path=first_archive,
+                    row_index=2,
+                    model_id="10300",
+                    part_type="weapon",
+                ),
+                gbm_lookup_export.LookupExportEntry(
+                    serial_name="RX-79(G)-2",
+                    safe_serial_name="RX-79_G_2",
+                    output_name="RX-79_G_2",
+                    archive_ref="ch/10301.arc",
+                    archive_path=second_archive,
+                    row_index=3,
+                    model_id="10301",
+                    part_type="weapon",
+                ),
+            ]
+            first_final_obj = (
+                output_root
+                / "weapon"
+                / "RX-79_G_1"
+                / "ma10300"
+                / "obj"
+                / "ma10300.obj"
+            )
+            calls = 0
+
+            def fake_export_one_entry(entry, *, work_root, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    self.assertTrue(first_final_obj.exists())
+                model_stem = f"ma{entry.archive_path.stem}"
+                model_root = (
+                    work_root
+                    / entry.safe_serial_name
+                    / entry.archive_path.stem
+                    / "models"
+                    / model_stem
+                    / "obj"
+                )
+                model_root.mkdir(parents=True)
+                (model_root / f"{model_stem}.obj").write_text("obj", encoding="utf-8")
+                return gbm_lookup_export.EntryRunResult(
+                    entry=entry,
+                    elapsed_ms=1,
+                    timings=[],
+                    jobs=[],
+                    failures=[],
+                )
+
+            args = Namespace(
+                default_kind="weapon",
+                kind=None,
+                default_format="obj",
+                format=None,
+                archive_root=archive_root,
+                output=output_root,
+                lookup_csv=None,
+                work_dir=work_dir,
+                workers=1,
+                mfx=mfx_path,
+                blender=root / "blender.exe",
+                lod=0,
+                preview=False,
+                report=False,
+                serial=[],
+                contains=False,
+                limit=None,
+                dry_run=False,
+                verbose=False,
+            )
+
+            with mock.patch.object(
+                gbm_lookup_export, "read_lookup_entries", return_value=entries
+            ), mock.patch.object(
+                gbm_lookup_export, "export_one_entry", side_effect=fake_export_one_entry
+            ):
+                result = gbm_lookup_export.run(args)
+
+            self.assertEqual(result.model_count, 2)
+            self.assertEqual(calls, 2)
+            self.assertTrue(first_final_obj.exists())
+
+    def test_run_materializes_fbx_entry_after_entry_blender_jobs_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output_root = root / "final"
+            work_dir = root / "work"
+            archive_root = root / "archive"
+            mfx_path = root / "ShaderPackage.mfx"
+            blender_path = root / "blender.exe"
+            mfx_path.write_bytes(b"MFX")
+            blender_path.write_bytes(b"BLENDER")
+            first_archive = archive_root / "ch" / "10300.arc"
+            second_archive = archive_root / "ch" / "10301.arc"
+            first_archive.parent.mkdir(parents=True)
+            first_archive.write_bytes(b"ARCC")
+            second_archive.write_bytes(b"ARCC")
+            entries = [
+                gbm_lookup_export.LookupExportEntry(
+                    serial_name="RX-79(G)-1",
+                    safe_serial_name="RX-79_G_1",
+                    output_name="RX-79_G_1",
+                    archive_ref="ch/10300.arc",
+                    archive_path=first_archive,
+                    row_index=2,
+                    model_id="10300",
+                    part_type="weapon",
+                ),
+                gbm_lookup_export.LookupExportEntry(
+                    serial_name="RX-79(G)-2",
+                    safe_serial_name="RX-79_G_2",
+                    output_name="RX-79_G_2",
+                    archive_ref="ch/10301.arc",
+                    archive_path=second_archive,
+                    row_index=3,
+                    model_id="10301",
+                    part_type="weapon",
+                ),
+            ]
+            first_final_fbx = (
+                output_root
+                / "weapon"
+                / "RX-79_G_1"
+                / "ma10300"
+                / "fbx"
+                / "ma10300.fbx"
+            )
+            calls = 0
+
+            def fake_export_one_entry(entry, *, work_root, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    self.assertTrue(first_final_fbx.exists())
+                model_stem = f"ma{entry.archive_path.stem}"
+                model_root = (
+                    work_root
+                    / entry.safe_serial_name
+                    / entry.archive_path.stem
+                    / "models"
+                    / model_stem
+                )
+                obj_dir = model_root / "obj"
+                obj_dir.mkdir(parents=True)
+                (obj_dir / f"{model_stem}.obj").write_text("obj", encoding="utf-8")
+                job = gbm_lookup_export.BlenderJob(
+                    input_obj=obj_dir / f"{model_stem}.obj",
+                    output_fbx=model_root / "fbx" / f"{model_stem}.fbx",
+                    lod=0,
+                )
+                return gbm_lookup_export.EntryRunResult(
+                    entry=entry,
+                    elapsed_ms=1,
+                    timings=[],
+                    jobs=[job],
+                    failures=[],
+                )
+
+            def fake_run_blender_batch(*, jobs, **_kwargs):
+                for job in jobs:
+                    job.output_fbx.parent.mkdir(parents=True)
+                    job.output_fbx.write_bytes(b"fbx")
+
+            args = Namespace(
+                default_kind="weapon",
+                kind=None,
+                default_format="fbx",
+                format=None,
+                archive_root=archive_root,
+                output=output_root,
+                lookup_csv=None,
+                work_dir=work_dir,
+                workers=1,
+                mfx=mfx_path,
+                blender=blender_path,
+                lod=0,
+                preview=False,
+                report=False,
+                serial=[],
+                contains=False,
+                limit=None,
+                dry_run=False,
+                verbose=False,
+            )
+
+            with mock.patch.object(
+                gbm_lookup_export, "read_lookup_entries", return_value=entries
+            ), mock.patch.object(
+                gbm_lookup_export, "export_one_entry", side_effect=fake_export_one_entry
+            ), mock.patch.object(
+                gbm_lookup_export, "run_blender_batch", side_effect=fake_run_blender_batch
+            ):
+                result = gbm_lookup_export.run(args)
+
+            self.assertEqual(result.model_count, 2)
+            self.assertEqual(result.fbx_job_count, 2)
+            self.assertEqual(calls, 2)
+            self.assertTrue(first_final_fbx.exists())
 
     def test_parallel_export_cancels_futures_without_waiting_on_keyboard_interrupt(self) -> None:
         class FakeFuture:

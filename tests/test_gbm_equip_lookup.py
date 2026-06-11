@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
 
 from pathlib import Path
@@ -125,6 +126,61 @@ class EquipIndexTests(unittest.TestCase):
         self.assertEqual(rows[0].model_id, 10_000)
         self.assertEqual(rows[0].primary_ch_archive, "ch/10000.arc")
         self.assertNotIn("12100", rows[0].ch_archives)
+
+    def test_weapon_archive_variants_use_we_parts_id_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_root = Path(tmp)
+            we_dir = archive_root / "we"
+            we_dir.mkdir()
+            (we_dir / "31000006.arc").write_bytes(b"ARCC")
+
+            actual = gbm_equip_lookup.weapon_archive_variants(
+                archive_root, 31_000_006
+            )
+
+        self.assertEqual(actual, ["we/31000006.arc"])
+
+    def test_mesh_archive_variants_drops_mot_and_vfx_siblings(self) -> None:
+        actual = gbm_equip_lookup.mesh_archive_variants(
+            [
+                "ch/10300.arc",
+                "ch/10300_mot.arc",
+                "ch/10300_vfx.arc",
+            ]
+        )
+
+        self.assertEqual(actual, ["ch/10300.arc"])
+
+    def test_write_weapon_parts_index_writes_we_archives(self) -> None:
+        weapon = gbm_equip_lookup.EquipMatch(
+            table="table_long_weapon.etwl",
+            serial_name="RX-78-2",
+            offset=0,
+            parts_id=31_000_006,
+            parts_name_id=1591,
+            gunpla_id=10_000,
+            model_id=10_600,
+            parts_type=6,
+            parts_type_name="long_weapon",
+            archive_variants=["ch/10600.arc", "ch/10600_vfx.arc"],
+            we_archive_variants=["we/31000006.arc"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "weapons.csv"
+            gbm_equip_lookup.write_parts_index(
+                output, [weapon], source_order=True, weapon_index=True
+            )
+            rows = output.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(
+            rows[0],
+            "serial_name,gunpla_id,model_id,part_type,parts_id,parts_name_id,"
+            "table_file,has_ch_archive,ch_archives,has_we_archive,we_archives",
+        )
+        self.assertTrue(
+            rows[1].endswith("yes,ch/10600.arc,yes,we/31000006.arc")
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -46,6 +48,36 @@ class BatchOutputPathTests(unittest.TestCase):
         actual = gbm_batch.arc_output_root(arc_path, output_root, arc_path)
 
         self.assertEqual(actual, output_root / "320900")
+
+
+class ExportAllModelsTests(unittest.TestCase):
+    def test_archive_without_mod_is_skipped_without_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arc_path = root / "archive" / "we" / "31000001.arc"
+            output_root = root / "out"
+
+            with mock.patch.object(gbm_batch, "run_command"), mock.patch.object(
+                gbm_batch,
+                "select_mod_paths",
+                side_effect=FileNotFoundError("No .mod file found"),
+            ):
+                exports, jobs, failures = gbm_batch.export_all_models(
+                    input_path=arc_path,
+                    output_root=output_root,
+                    arcs=[arc_path],
+                    mfx_path=root / "ShaderPackage.mfx",
+                    export_format="obj",
+                    lod=0,
+                    want_preview=False,
+                    want_report=False,
+                    limit=None,
+                    dry_run=False,
+                )
+
+        self.assertEqual(exports, [])
+        self.assertEqual(jobs, [])
+        self.assertEqual(failures, [])
 
 
 if __name__ == "__main__":

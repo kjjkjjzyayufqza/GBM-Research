@@ -85,6 +85,38 @@ is generated from `table_long_weapon.etwl`, `table_short_weapon.etws`, and
 `table_shield.ets`. It is ordered by source table and original record offset,
 not alphabetically by `serial_name`.
 
+### Weapon and shield meshes live in `ch/2<model_id>.arc`
+
+> A weapon/shield `model_id` is a **separate id space** from the suit-body
+> model_id. The mesh archive is addressed by prefixing the table `model_id`
+> with `2`:
+>
+> ```text
+> weapon table row -> model_id (e.g. 10100)
+>   -> ch/2<model_id>.arc        (ch/210100.arc)
+>   -> character/chr2<model_id>/mod/chr2<model_id>.mod  (chr210100.mod)
+> ```
+>
+> RX-78-2 beam rifle `model_id 10100` -> `ch/210100.arc` ->
+> `chr210100.mod` (4 bones, material `MaterialSkinChr_GUNS__2`; a `__N` slot
+> material, not a body `__HEAD/__BODY/...` material). Other examples:
+> `10600` -> `ch/210600.arc` (hyper bazooka), `12100` -> `ch/212100.arc`
+> (shield), `11100` -> `ch/211100.arc` (beam saber), and the 9xxxx variants
+> work too (`90600` -> `ch/290600.arc`).
+>
+> **Do NOT use `ch/<model_id>.arc` directly for weapons** — that is the body
+> rule and resolves to an unrelated suit whose body happens to share the number
+> (`ch/10100.arc` = RX-178 / Gundam Mk-II). Each weapon archive also carries a
+> `chr2<model_id>_dummy.mod` (a low-LOD/placeholder variant).
+>
+> `we/<parts_id>.arc` is a **separate** package holding the weapon's
+> effect/shell/sound presentation (beam, muzzle, hit vfx) — not the mesh.
+>
+> `gbm_equip_lookup.py` resolves weapon rows through `weapon_mesh_model_id()`
+> (the `2`-prefix), so `gbm_weapon_parts_index.csv` `ch_archives` points at the
+> real weapon mesh, and `gbm_export_weapons_obj.py` / `gbm_export_weapons_fbx.py`
+> export the correct weapon model.
+
 For a normal human lookup, open `gbm_archive_lookup_index.csv` and filter
 `serial_name`.
 

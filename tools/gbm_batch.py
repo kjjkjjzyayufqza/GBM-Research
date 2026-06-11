@@ -261,10 +261,16 @@ def export_all_models(
         if dry_run:
             continue
 
-        mod_paths = select_mod_paths({}, extracted_dir, model_stem=None)
+        try:
+            mod_paths = select_mod_paths({}, extracted_dir, model_stem=None)
+        except FileNotFoundError as exc:
+            print(f"warning: skipped {arc_path}: {exc}", file=sys.stderr)
+            continue
         model_names = unique_model_directory_names(mod_paths)
         png_dir = arc_root / "models" / "png"
-        convert_model_textures(png_dir, mod_paths, dry_run=False)
+        convert_model_textures(
+            png_dir, mod_paths, dry_run=False, extracted_dir=extracted_dir
+        )
         for mod_path in mod_paths:
             try:
                 model_export, blender_job = prepare_model_export(

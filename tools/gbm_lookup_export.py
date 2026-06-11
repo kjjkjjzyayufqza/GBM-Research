@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -72,7 +72,6 @@ _CANCEL_REQUESTED = threading.Event()
 class LookupExportEntry:
     serial_name: str
     safe_serial_name: str
-    output_name: str
     archive_ref: str
     archive_path: Path
     row_index: int
@@ -199,7 +198,6 @@ def read_lookup_entries(
                     LookupExportEntry(
                         serial_name=serial_name,
                         safe_serial_name=safe_serial_name,
-                        output_name=safe_serial_name,
                         archive_ref=archive_ref,
                         archive_path=resolve_archive_path(archive_root, archive_ref),
                         row_index=row_index,
@@ -208,30 +206,8 @@ def read_lookup_entries(
                     )
                 )
                 if limit is not None and len(entries) >= limit:
-                    return assign_unique_output_names(entries)
-    return assign_unique_output_names(entries)
-
-
-def assign_unique_output_names(entries: Sequence[LookupExportEntry]) -> list[LookupExportEntry]:
-    counts: dict[str, int] = {}
-    for entry in entries:
-        counts[entry.safe_serial_name.casefold()] = (
-            counts.get(entry.safe_serial_name.casefold(), 0) + 1
-        )
-
-    seen: dict[str, int] = {}
-    named_entries: list[LookupExportEntry] = []
-    for entry in entries:
-        key = entry.safe_serial_name.casefold()
-        if counts[key] == 1:
-            named_entries.append(entry)
-            continue
-
-        index = seen.get(key, 0)
-        seen[key] = index + 1
-        output_name = entry.safe_serial_name if index == 0 else f"{entry.safe_serial_name}_{index}"
-        named_entries.append(replace(entry, output_name=output_name))
-    return named_entries
+                    return entries
+    return entries
 
 
 def ensure_descendant(path: Path, root: Path) -> None:
@@ -296,7 +272,7 @@ def print_progress(
         suffix += f" ({details})"
     print(
         f"[{progress_bar(current, total)}] {current}/{total} "
-        f"{entry.output_name} {entry.archive_ref}: {stage}{suffix}",
+        f"{entry.safe_serial_name} {entry.archive_ref}: {stage}{suffix}",
         flush=True,
     )
 
@@ -449,39 +425,67 @@ def materialize_clean_outputs(
     entries: Iterable[LookupExportEntry],
 ) -> int:
     copied_models = 0
-    output_root = category_root.parent
-    entries_by_serial: dict[str, list[LookupExportEntry]] = {}
+    initialized_outputs: set[str] = set()
     for entry in entries:
-        entries_by_serial.setdefault(entry.output_name, []).append(entry)
+        copied_models += materialize_entry_clean_output(
+            category_root, work_root, entry, initialized_outputs
+        )
+    return copied_models
+
+
+def materialize_entry_clean_output(
+    category_root: Path,
+    work_root: Path,
+    entry: LookupExportEntry,
+    initialized_outputs: set[str],
+) -> int:
+    copied_models = 0
+    output_root = category_root.parent
+    # All archives of one serial flatten into a single <serial>/ folder; each
+    # model keeps its own chr stem (e.g. RX-78-2/chr210100, RX-78-2/chr290600).
+    # Different archives carry distinct chr stems, so they never collide; any
+    # genuine clash is disambiguated by unique_child_path.
+    output_key = entry.safe_serial_name.casefold()
+    arc_models_root = (
+        work_root / entry.safe_serial_name / entry.archive_path.stem / "models"
+    )
+    if not arc_models_root.exists():
+        return copied_models
+
+    model_sources = [
+        model_source
+        for model_source in sorted(
+            arc_models_root.iterdir(), key=lambda path: path.name.lower()
+        )
+        if model_source.is_dir() and model_source.name != "png"
+    ]
+    if not model_sources:
+        return copied_models
 
     category_root.mkdir(parents=True, exist_ok=True)
-    for output_name, serial_entries in entries_by_serial.items():
-        serial_output = category_root / output_name
+    serial_output = category_root / entry.safe_serial_name
+    if output_key not in initialized_outputs:
         reset_directory(serial_output, output_root)
+        initialized_outputs.add(output_key)
+    else:
+        serial_output.mkdir(parents=True, exist_ok=True)
 
-        png_output = serial_output / "png"
-        used_model_names: set[str] = set()
-        for entry in serial_entries:
-            arc_models_root = (
-                work_root / entry.safe_serial_name / entry.archive_path.stem / "models"
-            )
-            png_source = arc_models_root / "png"
-            if png_source.exists():
-                copy_allowed_tree(png_source, png_output)
+    png_source = arc_models_root / "png"
+    if png_source.exists():
+        copy_allowed_tree(png_source, serial_output / "png")
 
-            if not arc_models_root.exists():
-                continue
-            for model_source in sorted(
-                arc_models_root.iterdir(), key=lambda path: path.name.lower()
-            ):
-                if not model_source.is_dir() or model_source.name == "png":
-                    continue
-                model_output = unique_child_path(
-                    serial_output, model_source.name, used_model_names
-                )
-                copied = copy_allowed_tree(model_source, model_output)
-                if copied:
-                    copied_models += 1
+    used_model_names = {
+        path.name.casefold()
+        for path in serial_output.iterdir()
+        if path.is_dir() and path.name != "png"
+    }
+    for model_source in model_sources:
+        model_output = unique_child_path(
+            serial_output, model_source.name, used_model_names
+        )
+        copied = copy_allowed_tree(model_source, model_output)
+        if copied:
+            copied_models += 1
     return copied_models
 
 
@@ -545,12 +549,10 @@ def build_parser(default_kind: str | None = None, default_format: str | None = N
         "--work-dir",
         type=Path,
         default=DEFAULT_WORK_ROOT,
-        help=f"Temporary extraction root. Defaults to {DEFAULT_WORK_ROOT}.",
-    )
-    parser.add_argument(
-        "--keep-work",
-        action="store_true",
-        help="Keep temporary extracted MOD/MRL/TEX/manifests for debugging.",
+        help=(
+            "Persistent extraction root for MOD/MRL/TEX/manifests. "
+            f"Defaults to {DEFAULT_WORK_ROOT}."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -713,7 +715,7 @@ def run(args: argparse.Namespace) -> ExportRunResult:
     elif args.dry_run:
         preview_entries = [
             {
-                "output_name": entry.output_name,
+                "output_name": entry.safe_serial_name,
                 "archive_ref": entry.archive_ref,
                 "model_id": entry.model_id,
                 "part_type": entry.part_type,
@@ -741,99 +743,90 @@ def run(args: argparse.Namespace) -> ExportRunResult:
             total_elapsed_ms=int((time.perf_counter() - run_started) * 1000),
         )
 
-    all_jobs = []
+    all_jobs: list[BlenderJob] = []
     all_failures: list[dict[str, str]] = []
+    initialized_outputs: set[str] = set()
+    model_count = 0
     worker_count = max(1, args.workers)
-    try:
-        reset_directory(work_root, args.work_dir.resolve())
-        with quiet_tool_output(enabled=not args.verbose):
-            if worker_count == 1:
-                for index, entry in enumerate(entries, start=1):
-                    print_progress(
-                        index, len(entries), entry, f"export {export_format}"
-                    )
-                    result = export_one_entry(
-                        entry,
-                        work_root=work_root,
-                        mfx_path=args.mfx.resolve(),
-                        export_format=export_format,
-                        lod=args.lod,
-                        want_preview=args.preview,
-                        want_report=args.report,
-                    )
-                    print_progress(
-                        index,
-                        len(entries),
-                        entry,
-                        "done",
-                        elapsed_ms=result.elapsed_ms,
-                        details=summarize_timings(result.timings),
-                    )
-                    all_jobs.extend(result.jobs)
-                    all_failures.extend(result.failures)
-            else:
-                def export_entry(entry: LookupExportEntry) -> EntryRunResult:
-                    return export_one_entry(
-                        entry,
-                        work_root=work_root,
-                        mfx_path=args.mfx.resolve(),
-                        export_format=export_format,
-                        lod=args.lod,
-                        want_preview=args.preview,
-                        want_report=args.report,
-                    )
-
-                def on_complete(
-                    completed: int,
-                    entry: LookupExportEntry,
-                    result: EntryRunResult,
-                ) -> None:
-                    print_progress(
-                        completed,
-                        len(entries),
-                        entry,
-                        "done",
-                        elapsed_ms=result.elapsed_ms,
-                        details=summarize_timings(result.timings),
-                    )
-
-                for result in run_parallel_exports(
-                    entries=entries,
-                    worker_count=worker_count,
-                    export_entry=export_entry,
-                    on_complete=on_complete,
-                ):
-                    all_jobs.extend(result.jobs)
-                    all_failures.extend(result.failures)
-
-            if all_jobs:
-                fbx_started = time.perf_counter()
-                print(
-                    f"[{progress_bar(len(entries), len(entries))}] "
-                    f"FBX batch: {len(all_jobs)} job(s)",
-                    flush=True,
+    reset_directory(work_root, args.work_dir.resolve())
+    if not args.serial and not args.contains:
+        reset_directory(category_root, output_root)
+    with quiet_tool_output(enabled=not args.verbose):
+        def complete_entry(
+            index: int,
+            entry: LookupExportEntry,
+            result: EntryRunResult,
+        ) -> None:
+            nonlocal model_count
+            if result.jobs:
+                print_progress(
+                    index,
+                    len(entries),
+                    entry,
+                    "fbx",
+                    details=f"{len(result.jobs)} job(s)",
                 )
-            run_blender_batch(
-                output_root=work_root,
-                blender_path=args.blender.resolve(),
-                jobs=all_jobs,
-                dry_run=False,
+                run_blender_batch(
+                    output_root=work_root,
+                    blender_path=args.blender.resolve(),
+                    jobs=result.jobs,
+                    dry_run=False,
+                )
+            copied = materialize_entry_clean_output(
+                category_root, work_root, entry, initialized_outputs
             )
-            if all_jobs:
-                print(
-                    f"FBX batch done {int((time.perf_counter() - fbx_started) * 1000)}ms",
-                    flush=True,
+            model_count += copied
+            print_progress(
+                index,
+                len(entries),
+                entry,
+                "done",
+                elapsed_ms=result.elapsed_ms,
+                details=summarize_timings(result.timings),
+            )
+            all_jobs.extend(result.jobs)
+            all_failures.extend(result.failures)
+
+        if worker_count == 1:
+            for index, entry in enumerate(entries, start=1):
+                print_progress(
+                    index, len(entries), entry, f"export {export_format}"
                 )
-        copy_started = time.perf_counter()
-        print("clean final output", flush=True)
-        model_count = materialize_clean_outputs(category_root, work_root, entries)
-        print(
-            f"clean final output done {int((time.perf_counter() - copy_started) * 1000)}ms",
-            flush=True,
-        )
-    finally:
-        if not args.keep_work and work_root.exists():
-            shutil.rmtree(work_root)
+                result = export_one_entry(
+                    entry,
+                    work_root=work_root,
+                    mfx_path=args.mfx.resolve(),
+                    export_format=export_format,
+                    lod=args.lod,
+                    want_preview=args.preview,
+                    want_report=args.report,
+                )
+                complete_entry(index, entry, result)
+        else:
+            def export_entry(entry: LookupExportEntry) -> EntryRunResult:
+                return export_one_entry(
+                    entry,
+                    work_root=work_root,
+                    mfx_path=args.mfx.resolve(),
+                    export_format=export_format,
+                    lod=args.lod,
+                    want_preview=args.preview,
+                    want_report=args.report,
+                )
+
+            def on_complete(
+                completed: int,
+                entry: LookupExportEntry,
+                result: EntryRunResult,
+            ) -> None:
+                complete_entry(completed, entry, result)
+
+            run_parallel_exports(
+                entries=entries,
+                worker_count=worker_count,
+                export_entry=export_entry,
+                on_complete=on_complete,
+            )
 
     return ExportRunResult(
         entry_count=len(entries),

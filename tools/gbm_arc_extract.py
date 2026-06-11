@@ -182,10 +182,14 @@ def iter_limited(entries: Iterable[ArcEntry], limit: int | None) -> Iterable[Arc
 
 
 def is_model_asset_entry(entry: ArcEntry) -> bool:
-    """Return True for MOD/MRL/TEX resources under a mod directory tree."""
+    """Return True for static model resources and shared character textures."""
 
     normalized = entry.name.replace("\\", "/").lower()
-    return "/mod/" in normalized or normalized.endswith("/mod")
+    return (
+        "/mod/" in normalized
+        or normalized.endswith("/mod")
+        or normalized.startswith("character/common/")
+    )
 
 
 def select_entries(

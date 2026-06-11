@@ -143,6 +143,12 @@ head, body, arms, legs, and backpack. Weapon and shield rows are written to
 `gbm_weapon_parts_index.csv`, ordered by source table and original record
 offset.
 
+Body parts resolve `model_id -> ch/<model_id>.arc`. Weapon and shield rows use a
+separate id range: `weapon_mesh_model_id()` prefixes the table `model_id` with
+`2`, so they resolve `model_id 10100 -> ch/210100.arc -> chr210100.mod`. The
+`ch_archives` column of `gbm_weapon_parts_index.csv` already holds these `2`-
+prefixed weapon meshes. See RESOURCE_NAME_MAPPING.md.
+
 Example:
 
 ```powershell

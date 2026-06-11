@@ -78,8 +78,14 @@ Notes:
   VFX resources.
 - `mi` and `pmi` are mission-data packages, not model packages. The exact
   expansion of the `pmi` prefix is still unresolved.
-- `we` is weapon-related, but it is mostly weapon effects, shell data, and
-  sound rather than a simple weapon model archive.
+- `we` is weapon *presentation* (effects, shell data, sound), keyed by
+  `parts_id` (`we/<parts_id>.arc`). It does **not** hold the weapon mesh.
+- Weapon and shield *meshes* live in `ch/`, in a separate id range addressed by
+  prefixing the equip-table `model_id` with `2`: `ch/2<model_id>.arc` ->
+  `character/chr2<model_id>/mod/chr2<model_id>.mod` (model_id `10100` ->
+  `ch/210100.arc` -> `chr210100.mod`, a beam rifle; ~1682 `ch/2*.arc` archives).
+  Do not use `ch/<model_id>.arc` for weapons — that is the suit-body archive of
+  an unrelated unit. See RESOURCE_NAME_MAPPING.md.
 - `ra`, `sc`, `pe`, and `ar` have clear content patterns from TOC paths, but
   the exact original abbreviation meanings remain unconfirmed.
 

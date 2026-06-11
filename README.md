@@ -442,6 +442,13 @@ and `_vfx` archives, and write clean final folders under
 `out\lookup_exports\model\<safe_serial_name>\` or
 `out\lookup_exports\weapon\<safe_serial_name>\`.
 
+Weapon and shield meshes live in a separate ch id range, addressed by prefixing
+the table `model_id` with `2`: model_id `10100` -> `ch\210100.arc` ->
+`character\chr210100\mod\chr210100.mod`. This is resolved by `gbm_equip_lookup.py`
+when building `gbm_weapon_parts_index.csv`, so its `ch_archives` column already
+points at the real weapon mesh (not `ch\<model_id>.arc`, which is an unrelated
+suit body). See [RESOURCE_NAME_MAPPING.md](RESOURCE_NAME_MAPPING.md).
+
 ```powershell
 python .\tools\gbm_export_models_obj.py `
   E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive `
@@ -460,9 +467,11 @@ Omit `--serial` to export every unique archive row in the selected CSV. Final
 output keeps only `.obj`, `.mtl`, `.fbx`, and `.png`; temporary extracted
 `.mod`, `.mrl`, `.tex`, and JSON manifests are deleted unless `--keep-work` is
 passed. `.mtl` is kept because OBJ files reference it for material/texture
-bindings. When multiple archive rows share the same `serial_name`, later rows
-use stable suffixes such as `RX-78-2_1`, `RX-78-2_2` so full CSV exports do not
-overwrite or merge unrelated model sets. Normal runs show a compact progress
+bindings. When multiple archive rows share the same `serial_name`, all of their
+models are flattened into one `<safe_serial_name>\` folder, each kept under its
+own model stem (for example `RX-78-2\chr210100`, `RX-78-2\chr290600`). Distinct
+archives carry distinct `chr` stems, so they never overwrite each other; any
+genuine clash is suffixed `__2`. Normal runs show a compact progress
 line per archive; pass `--verbose` to print full planned entries and child tool
 commands. Archive exports run with `--workers 3` by default; lower it to
 `--workers 1` for strictly ordered, single-process debugging.

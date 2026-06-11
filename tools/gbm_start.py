@@ -402,23 +402,44 @@ def run_blender_batch(
     run_command(blender_batch_command(blender_path, manifest_path), dry_run)
 
 
-def convert_model_textures(
-    png_dir: Path, mod_paths: list[Path], dry_run: bool
-) -> None:
-    """Convert each unique MOD directory's TEX into one shared png dir, once.
+def texture_source_dirs(mod_paths: list[Path], extracted_dir: Path | None) -> list[Path]:
+    """Return source directories whose TEX files should be flattened to png_dir."""
 
-    Every model in an ARC usually shares a single MOD directory holding all of
-    their textures. Converting per model would copy the whole texture set into
-    each model folder, so the conversion runs once per unique directory.
+    seen: set[Path] = set()
+    source_dirs: list[Path] = []
+
+    def add_dir(path: Path) -> None:
+        if path in seen:
+            return
+        seen.add(path)
+        source_dirs.append(path)
+
+    for mod_path in mod_paths:
+        add_dir(mod_path.parent)
+
+    if extracted_dir is not None:
+        for tex_path in sorted(extracted_dir.rglob("*.tex"), key=lambda path: str(path).lower()):
+            add_dir(tex_path.parent)
+
+    return source_dirs
+
+
+def convert_model_textures(
+    png_dir: Path,
+    mod_paths: list[Path],
+    dry_run: bool,
+    extracted_dir: Path | None = None,
+) -> None:
+    """Convert all model TEX directories into one shared flat png dir, once.
+
+    Some weapon or variant MRL files reference textures from sibling
+    character/*/mod directories that do not contain the MOD being exported.
+    Flattening every extracted model TEX directory keeps those cross-directory
+    material references resolvable by name.
     """
     manifest_path = png_dir / "_tex_manifest.json"
-    seen: set[Path] = set()
-    for mod_path in mod_paths:
-        mod_dir = mod_path.parent
-        if mod_dir in seen:
-            continue
-        seen.add(mod_dir)
-        run_command(tex_to_png_command(mod_dir, png_dir, manifest_path), dry_run)
+    for source_dir in texture_source_dirs(mod_paths, extracted_dir):
+        run_command(tex_to_png_command(source_dir, png_dir, manifest_path), dry_run)
 
 
 def print_planned_followup_commands(
@@ -602,7 +623,9 @@ def main() -> int:
     else:
         model_directory_names = {}
         png_dir = output_root / "png"
-    convert_model_textures(png_dir, mod_paths, dry_run=False)
+    convert_model_textures(
+        png_dir, mod_paths, dry_run=False, extracted_dir=paths.extracted_dir
+    )
 
     results = []
     blender_jobs: list[BlenderJob] = []

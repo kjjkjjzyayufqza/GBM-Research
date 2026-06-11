@@ -45,6 +45,13 @@ class ModelAssetEntryTests(unittest.TestCase):
             )
         )
 
+    def test_accepts_shared_character_common_textures(self) -> None:
+        self.assertTrue(
+            gbm_arc_extract.is_model_asset_entry(
+                entry("character\\common\\beam_01_BM.tex")
+            )
+        )
+
     def test_rejects_motion_sound_vfx_and_shell(self) -> None:
         rejected = [
             "motion\\ma\\ma302000\\ma302000.lmt",

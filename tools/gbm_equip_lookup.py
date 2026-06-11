@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -40,6 +40,7 @@ WEAPON_TABLE_ORDER = (
     "table_short_weapon.etws",
 )
 WEAPON_TABLES = frozenset(WEAPON_TABLE_ORDER)
+MESH_SKIP_ARCHIVE_SUFFIXES = ("_mot", "_vfx")
 
 PART_TYPE_NAMES = {
     0: "head",
@@ -65,6 +66,7 @@ class EquipMatch:
     parts_type: int
     parts_type_name: str
     archive_variants: list[str]
+    we_archive_variants: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,43 @@ def archive_variants(archive_root: Path, model_id: int) -> list[str]:
         if path.name == f"{prefix}.arc" or path.name.startswith(f"{prefix}_"):
             matches.append(path.relative_to(archive_root).as_posix())
     return sorted(matches)
+
+
+def mesh_archive_variants(variants: list[str]) -> list[str]:
+    """Keep only base mesh archives; drop motion/vfx sibling packs."""
+
+    filtered: list[str] = []
+    for ref in variants:
+        path = Path(ref.replace("\\", "/"))
+        if path.suffix.lower() != ".arc":
+            continue
+        stem = path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in MESH_SKIP_ARCHIVE_SUFFIXES):
+            continue
+        filtered.append(ref)
+    return filtered
+
+
+def weapon_archive_variants(archive_root: Path, parts_id: int) -> list[str]:
+    we_dir = archive_root / "we"
+    if not we_dir.exists():
+        return []
+
+    archive_path = we_dir / f"{parts_id}.arc"
+    if not archive_path.exists():
+        return []
+    return [archive_path.relative_to(archive_root).as_posix()]
+
+
+def weapon_mesh_model_id(model_id: int) -> int:
+    """Map a weapon/shield table model_id to its ch mesh archive id.
+
+    Weapon and shield meshes live in their own ch range, addressed by prefixing
+    the table model_id with ``2``: model_id ``10100`` -> ``ch/210100.arc`` ->
+    ``character/chr210100/mod/chr210100.mod``. This is a separate id space from
+    suit bodies, where the same numeric ``10100`` is RX-178's body archive.
+    """
+    return int(f"2{model_id}")
 
 
 def is_suit_part(match: EquipMatch) -> bool:
@@ -173,6 +212,14 @@ def scan_table(
         if not (1_000_000 <= parts_id <= 99_999_999):
             continue
 
+        if path.name in WEAPON_TABLES:
+            # Weapon/shield meshes are in ch/2<model_id>.arc, not ch/<model_id>.arc.
+            variants = archive_variants(archive_root, weapon_mesh_model_id(model_id))
+            we_variants = weapon_archive_variants(archive_root, parts_id)
+        else:
+            variants = archive_variants(archive_root, model_id)
+            we_variants = []
+
         matches.append(
             EquipMatch(
                 table=path.name,
@@ -184,7 +231,8 @@ def scan_table(
                 model_id=model_id,
                 parts_type=parts_type,
                 parts_type_name=PART_TYPE_NAMES.get(parts_type, f"type_{parts_type}"),
-                archive_variants=archive_variants(archive_root, model_id),
+                archive_variants=variants,
+                we_archive_variants=we_variants,
             )
         )
 
@@ -345,45 +393,65 @@ def archive_index_rows(matches: list[EquipMatch]) -> list[ArchiveIndexRow]:
     )
 
 
+PARTS_INDEX_FIELDNAMES = [
+    "serial_name",
+    "gunpla_id",
+    "model_id",
+    "part_type",
+    "parts_id",
+    "parts_name_id",
+    "table_file",
+    "has_ch_archive",
+    "ch_archives",
+    "has_we_archive",
+    "we_archives",
+]
+WEAPON_PARTS_INDEX_FIELDNAMES = PARTS_INDEX_FIELDNAMES
+
+
 def write_parts_index(
     path: Path,
     matches: list[EquipMatch],
     source_order: bool = False,
+    weapon_index: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = (
+        WEAPON_PARTS_INDEX_FIELDNAMES
+        if weapon_index
+        else PARTS_INDEX_FIELDNAMES
+    )
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "serial_name",
-                "gunpla_id",
-                "model_id",
-                "part_type",
-                "parts_id",
-                "parts_name_id",
-                "table_file",
-                "has_ch_archive",
-                "ch_archives",
-            ],
-        )
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         sorted_matches = (
             source_ordered_matches(matches) if source_order else ordered_matches(matches)
         )
         for match in sorted_matches:
-            writer.writerow(
-                {
-                    "serial_name": match.serial_name,
-                    "gunpla_id": match.gunpla_id,
-                    "model_id": match.model_id,
-                    "part_type": match.parts_type_name,
-                    "parts_id": match.parts_id,
-                    "parts_name_id": match.parts_name_id,
-                    "table_file": match.table,
-                    "has_ch_archive": "yes" if match.archive_variants else "no",
-                    "ch_archives": "; ".join(match.archive_variants),
-                }
+            is_weapon = is_weapon_part(match)
+            ch_variants = (
+                mesh_archive_variants(match.archive_variants)
+                if weapon_index
+                else match.archive_variants
             )
+            row = {
+                "serial_name": match.serial_name,
+                "gunpla_id": match.gunpla_id,
+                "model_id": match.model_id,
+                "part_type": match.parts_type_name,
+                "parts_id": match.parts_id,
+                "parts_name_id": match.parts_name_id,
+                "table_file": match.table,
+                "has_ch_archive": "yes" if ch_variants else "no",
+                "ch_archives": "; ".join(ch_variants),
+                "has_we_archive": (
+                    "yes" if match.we_archive_variants and is_weapon else "no"
+                ),
+                "we_archives": (
+                    "; ".join(match.we_archive_variants) if is_weapon else ""
+                ),
+            }
+            writer.writerow(row)
 
 
 def write_archive_index(path: Path, rows: list[ArchiveIndexRow]) -> None:
@@ -424,7 +492,7 @@ def write_indexes(
     rows = archive_index_rows(matches)
     write_archive_index(archive_index, rows)
     write_parts_index(parts_index, matches)
-    write_parts_index(weapon_parts_index, weapon_matches, source_order=True)
+    write_parts_index(weapon_parts_index, weapon_matches, source_order=True, weapon_index=True)
     return rows, matches, weapon_matches
 
 
