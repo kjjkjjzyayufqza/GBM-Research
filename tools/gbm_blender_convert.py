@@ -1054,6 +1054,148 @@ def scene_stats(objects: list[bpy.types.Object]) -> dict[str, object]:
     return stats
 
 
+def link_objects_to_collection(
+    objects: list[bpy.types.Object],
+    collection_name: str | None,
+) -> bpy.types.Collection | None:
+    if not collection_name:
+        return None
+    collection = bpy.data.collections.get(collection_name)
+    if collection is None:
+        collection = bpy.data.collections.new(collection_name)
+        bpy.context.scene.collection.children.link(collection)
+    for obj in objects:
+        if obj.name not in collection.objects:
+            collection.objects.link(obj)
+        for user_collection in list(obj.users_collection):
+            if user_collection != collection:
+                user_collection.objects.unlink(obj)
+    return collection
+
+
+def import_job_to_scene(
+    job: BlenderConversionJob,
+    *,
+    clear_existing: bool = False,
+    collection_name: str | None = None,
+    texture_output_dir: Path | None = None,
+) -> dict[str, object]:
+    """Import a conversion job into the current Blender scene.
+
+    Unlike convert_job(), this does not export or round-trip validate an FBX.
+    It is intended for the interactive add-on where every selected ARC should
+    be added to the existing scene.
+    """
+
+    input_obj = job.input_obj.resolve()
+    output_fbx = job.output_fbx.resolve()
+    texture_dir = (texture_output_dir or output_fbx.parent).resolve()
+    texture_dir.mkdir(parents=True, exist_ok=True)
+
+    axis_mode = resolve_axis_mode(input_obj, job.axis_mode)
+
+    if bool(job.mod) != bool(job.mfx):
+        raise ValueError("--mod and --mfx must be provided together")
+    if job.mrl and job.png_dir and not job.mod:
+        raise ValueError(
+            "--mrl requires --mod: material bindings are matched through the "
+            "MOD material name table"
+        )
+    if job.mod and axis_mode != "engine":
+        raise ValueError(
+            "skin binding requires an engine axis_mode OBJ; legacy blender "
+            "axis OBJs cannot be aligned with the MOD bind skeleton"
+        )
+    if job.lmt and (not job.mod or job.motion_index is None):
+        raise ValueError("--lmt requires --mod, --mfx, and --motion-index")
+    if job.motion_index is not None and not job.lmt:
+        raise ValueError("--motion-index requires --lmt")
+    if job.preview_frame is not None and not job.lmt:
+        raise ValueError("--preview-frame requires --lmt")
+
+    has_bones = False
+    if job.mod:
+        mod_path = job.mod.resolve()
+        has_bones = parse_header(mod_path, mod_path.read_bytes()).bone_count > 0
+    if job.lmt and not has_bones:
+        raise ValueError("--lmt requires a MOD with bones")
+
+    if clear_existing:
+        clear_scene()
+    before_objects = set(bpy.data.objects)
+    model = join_meshes(import_obj(input_obj), input_obj.stem)
+    if axis_mode == "engine":
+        apply_import_rotation(model)
+    apply_scale(model, job.scale)
+    if job.mrl and job.png_dir:
+        image_paths = apply_mrl_materials(
+            model,
+            job.mod.resolve(),
+            job.mrl.resolve(),
+            job.png_dir.resolve(),
+            texture_dir,
+        )
+        shade_smooth(model)
+    else:
+        material, image_paths = build_material(
+            texture_dir,
+            job.texture.resolve() if job.texture else None,
+            job.normal_texture.resolve() if job.normal_texture else None,
+        )
+        assign_material(model, material)
+    armature = None
+    skin_report = None
+    animation_report = None
+    if has_bones:
+        armature, skin_report = build_armature(
+            model,
+            job.mod.resolve(),
+            job.mfx.resolve(),
+            job.scale,
+            job.lod,
+            axis_mode,
+        )
+        if job.lmt:
+            animation_report = apply_lmt_motion(
+                armature,
+                job.mod.resolve(),
+                job.lmt.resolve(),
+                job.motion_index,
+                job.scale,
+                axis_mode,
+            )
+    part_meshes = split_mesh_by_material(model)
+    export_objects = [*part_meshes, *([armature] if armature else [])]
+    linked_collection = link_objects_to_collection(export_objects, collection_name)
+    for obj in export_objects:
+        obj["gbm_source_obj"] = str(input_obj)
+        if job.mod:
+            obj["gbm_source_mod"] = str(job.mod.resolve())
+        if linked_collection:
+            obj["gbm_collection"] = linked_collection.name
+    new_objects = [obj for obj in bpy.data.objects if obj not in before_objects]
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in export_objects:
+        obj.select_set(True)
+    if export_objects:
+        bpy.context.view_layer.objects.active = export_objects[0]
+    bpy.context.view_layer.update()
+
+    return {
+        "input_obj": str(input_obj),
+        "axis_mode": axis_mode,
+        "scale": job.scale,
+        "image_paths": image_paths,
+        "mesh_parts": [part.name for part in part_meshes],
+        "skin": skin_report,
+        "animation": animation_report,
+        "objects": export_objects,
+        "new_objects": new_objects,
+        "collection": linked_collection.name if linked_collection else None,
+        "source": scene_stats(export_objects),
+    }
+
+
 def export_fbx(
     path: Path,
     objects: list[bpy.types.Object],
@@ -1113,82 +1255,16 @@ def convert_job(job: BlenderConversionJob) -> dict[str, object]:
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
 
-    axis_mode = resolve_axis_mode(input_obj, job.axis_mode)
-
-    if bool(job.mod) != bool(job.mfx):
-        raise ValueError("--mod and --mfx must be provided together")
-    if job.mrl and job.png_dir and not job.mod:
-        raise ValueError(
-            "--mrl requires --mod: material bindings are matched through the "
-            "MOD material name table"
-        )
-    if job.mod and axis_mode != "engine":
-        raise ValueError(
-            "skin binding requires an engine axis_mode OBJ; legacy blender "
-            "axis OBJs cannot be aligned with the MOD bind skeleton"
-        )
-    if job.lmt and (not job.mod or job.motion_index is None):
-        raise ValueError("--lmt requires --mod, --mfx, and --motion-index")
-    if job.motion_index is not None and not job.lmt:
-        raise ValueError("--motion-index requires --lmt")
-    if job.preview_frame is not None and not job.lmt:
-        raise ValueError("--preview-frame requires --lmt")
-
-    has_bones = False
-    if job.mod:
-        mod_path = job.mod.resolve()
-        has_bones = parse_header(mod_path, mod_path.read_bytes()).bone_count > 0
-    if job.lmt and not has_bones:
-        raise ValueError("--lmt requires a MOD with bones")
-
-    clear_scene()
-    model = join_meshes(import_obj(input_obj), input_obj.stem)
-    if axis_mode == "engine":
-        apply_import_rotation(model)
-    apply_scale(model, job.scale)
-    if job.mrl and job.png_dir:
-        image_paths = apply_mrl_materials(
-            model,
-            job.mod.resolve(),
-            job.mrl.resolve(),
-            job.png_dir.resolve(),
-            output_fbx.parent,
-        )
-        shade_smooth(model)
-    else:
-        material, image_paths = build_material(
-            output_fbx.parent,
-            job.texture.resolve() if job.texture else None,
-            job.normal_texture.resolve() if job.normal_texture else None,
-        )
-        assign_material(model, material)
-    armature = None
-    skin_report = None
-    animation_report = None
-    if has_bones:
-        armature, skin_report = build_armature(
-            model,
-            job.mod.resolve(),
-            job.mfx.resolve(),
-            job.scale,
-            job.lod,
-            axis_mode,
-        )
-        if job.lmt:
-            animation_report = apply_lmt_motion(
-                armature,
-                job.mod.resolve(),
-                job.lmt.resolve(),
-                job.motion_index,
-                job.scale,
-                axis_mode,
-            )
-    part_meshes = split_mesh_by_material(model)
-    part_names = [part.name for part in part_meshes]
-    export_objects = [*part_meshes, *([armature] if armature else [])]
+    imported = import_job_to_scene(
+        job,
+        clear_existing=True,
+        texture_output_dir=output_fbx.parent,
+    )
+    export_objects = imported["objects"]
     validation_frame = job.preview_frame if job.preview_frame is not None else 1
     if validation_frame < 1:
         raise ValueError("--preview-frame must be at least 1")
+    animation_report = imported["animation"]
     if animation_report and validation_frame > animation_report["frame_count"]:
         raise ValueError(
             f"--preview-frame {validation_frame} exceeds animation frame count "
@@ -1199,7 +1275,7 @@ def convert_job(job: BlenderConversionJob) -> dict[str, object]:
     source_stats = scene_stats(export_objects)
 
     if preview:
-        render_preview(preview, part_meshes)
+        render_preview(preview, [obj for obj in export_objects if obj.type == "MESH"])
     export_fbx(
         output_fbx,
         export_objects,
@@ -1212,7 +1288,7 @@ def convert_job(job: BlenderConversionJob) -> dict[str, object]:
         "output_fbx": str(output_fbx),
         "fbx_size": output_fbx.stat().st_size,
         "lod": job.lod,
-        "axis_mode": axis_mode,
+        "axis_mode": imported["axis_mode"],
         "scale": job.scale,
         "validation_frame": validation_frame,
         "fbx_export_settings": {
@@ -1223,10 +1299,10 @@ def convert_job(job: BlenderConversionJob) -> dict[str, object]:
             "primary_bone_axis": "Y",
             "secondary_bone_axis": "X",
         },
-        "image_paths": image_paths,
-        "mesh_parts": part_names,
+        "image_paths": imported["image_paths"],
+        "mesh_parts": imported["mesh_parts"],
         "preview": str(preview) if preview else None,
-        "skin": skin_report,
+        "skin": imported["skin"],
         "animation": animation_report,
         "source": source_stats,
         "fbx_roundtrip": roundtrip_stats,
