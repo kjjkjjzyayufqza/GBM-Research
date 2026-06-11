@@ -31,6 +31,26 @@ class LookupExportTests(unittest.TestCase):
 
         self.assertEqual(args.workers, 1)
 
+    def test_fbx_wrapper_defaults_to_blender_engine(self) -> None:
+        parser = gbm_lookup_export.build_parser(
+            default_kind="weapon",
+            default_format="fbx",
+        )
+
+        args = parser.parse_args(["E:/archive"])
+
+        self.assertEqual(args.engine, "blender")
+
+    def test_fbx_wrapper_can_force_native_engine(self) -> None:
+        parser = gbm_lookup_export.build_parser(
+            default_kind="weapon",
+            default_format="fbx",
+        )
+
+        args = parser.parse_args(["--engine", "native", "E:/archive"])
+
+        self.assertEqual(args.engine, "native")
+
     def test_sanitize_path_component_removes_windows_and_extra_punctuation(self) -> None:
         actual = gbm_lookup_export.sanitize_path_component('RX:78/[!] "Test".')
 

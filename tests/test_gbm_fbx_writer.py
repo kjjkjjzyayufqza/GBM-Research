@@ -66,6 +66,13 @@ def _mesh(skinned: bool = False) -> "gbm_model_mesh.MeshData":
 
 
 class FbxWriterTests(unittest.TestCase):
+    def _all_nodes(self, nodes):
+        out = []
+        for node in nodes:
+            out.append(node)
+            out.extend(self._all_nodes(node.children))
+        return out
+
     def test_fbx_header_version_node_tree_and_geometry_vertex_count(self) -> None:
         fbx = gbm_fbx_writer.write_fbx_bytes(_mesh())
 
@@ -77,6 +84,38 @@ class FbxWriterTests(unittest.TestCase):
         )
         self.assertEqual(counts["geometry_count"], 1)
         self.assertEqual(counts["geometry_vertices"], 3)
+
+    def test_fbx_object_nodes_use_blender_importer_compatible_property_shape(self) -> None:
+        fbx = gbm_fbx_writer.write_fbx_bytes(_mesh(skinned=True))
+
+        nodes = self._all_nodes(gbm_fbx_writer.parse_fbx_nodes(fbx))
+        object_nodes = [
+            node
+            for node in nodes
+            if node.name in {"Geometry", "Model", "Material", "NodeAttribute", "Deformer", "Pose"}
+        ]
+
+        self.assertTrue(object_nodes)
+        for node in object_nodes:
+            self.assertEqual(node.prop_types[:3], b"LSS")
+            self.assertIn("\x00\x01", node.props[1])
+
+    def test_fbx_connections_attach_geometry_to_model_for_blender_import(self) -> None:
+        fbx = gbm_fbx_writer.write_fbx_bytes(_mesh(skinned=True))
+
+        nodes = self._all_nodes(gbm_fbx_writer.parse_fbx_nodes(fbx))
+        connections = [
+            tuple(node.props)
+            for node in nodes
+            if node.name == "C" and len(node.props) >= 3 and node.props[0] == "OO"
+        ]
+
+        self.assertIn(("OO", 1000, 2000), connections)
+        self.assertIn(("OO", 2000, 0), connections)
+        self.assertIn(("OO", 3000, 2000), connections)
+        self.assertIn(("OO", 5000, 6100), connections)
+        self.assertIn(("OO", 6100, 6000), connections)
+        self.assertIn(("OO", 6000, 1000), connections)
 
     def test_fbx_skinned_mesh_emits_skin_clusters_bind_pose_and_limb_nodes(self) -> None:
         fbx = gbm_fbx_writer.write_fbx_bytes(_mesh(skinned=True))

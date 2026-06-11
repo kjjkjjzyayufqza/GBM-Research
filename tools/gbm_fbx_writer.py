@@ -23,11 +23,27 @@ class FbxNode:
     name: str
     props: list[Any] = field(default_factory=list)
     children: list["FbxNode"] = field(default_factory=list)
+    prop_types: bytes = b""
+
+
+@dataclass(frozen=True)
+class FbxLong:
+    value: int
+
+
+def _id(value: int) -> FbxLong:
+    return FbxLong(value)
+
+
+def _name(name: str, fbx_class: str) -> str:
+    return f"{fbx_class}::{name}\x00\x01{fbx_class}"
 
 
 def _prop(value: Any) -> bytes:
     if isinstance(value, bool):
         return b"C" + struct.pack("<?", value)
+    if isinstance(value, FbxLong):
+        return b"L" + struct.pack("<q", value.value)
     if isinstance(value, int):
         if -(2**31) <= value < 2**31:
             return b"I" + struct.pack("<i", value)
@@ -109,7 +125,7 @@ def _objects(mesh: MeshData) -> FbxNode:
     children: list[FbxNode] = [
         FbxNode(
             "Geometry",
-            [1000, f"Geometry::{mesh.name}", "Mesh"],
+            [_id(1000), _name(mesh.name, "Geometry"), "Mesh"],
             [
                 FbxNode("Vertices", [vertices]),
                 FbxNode("PolygonVertexIndex", [polygon_indices]),
@@ -117,28 +133,27 @@ def _objects(mesh: MeshData) -> FbxNode:
             ],
         )
     ]
-    for index, part in enumerate(mesh.parts):
-        children.append(FbxNode("Model", [2000 + index, f"Model::{part.name}", "Mesh"]))
+    children.append(FbxNode("Model", [_id(2000), _name(mesh.name, "Model"), "Mesh"]))
     for index, material in enumerate(mesh.materials):
         children.append(
-            FbxNode("Material", [3000 + index, f"Material::{material.name}", ""])
+            FbxNode("Material", [_id(3000 + index), _name(material.name, "Material"), ""])
         )
     for index, bone in enumerate(mesh.bones):
         children.append(
-            FbxNode("NodeAttribute", [4000 + index, f"NodeAttribute::{bone.name}", "LimbNode"])
+            FbxNode("NodeAttribute", [_id(4000 + index), _name(bone.name, "NodeAttribute"), "LimbNode"])
         )
         children.append(
-            FbxNode("Model", [5000 + index, f"Model::{bone.name}", "LimbNode"])
+            FbxNode("Model", [_id(5000 + index), _name(bone.name, "Model"), "LimbNode"])
         )
     if mesh.bones:
-        children.append(FbxNode("Deformer", [6000, f"Deformer::{mesh.name}_skin", "Skin"]))
+        children.append(FbxNode("Deformer", [_id(6000), _name(f"{mesh.name}_skin", "Deformer"), "Skin"]))
         used_bones = _used_bones(mesh)
         for bone_index in used_bones:
             weights = _bone_weights(mesh, bone_index)
             children.append(
                 FbxNode(
                     "Deformer",
-                    [6100 + bone_index, f"SubDeformer::cluster_{bone_index}", "Cluster"],
+                    [_id(6100 + bone_index), _name(f"cluster_{bone_index}", "SubDeformer"), "Cluster"],
                     [
                         FbxNode("Indexes", [weights[0].astype(np.int32)]),
                         FbxNode("Weights", [weights[1].astype(np.float64)]),
@@ -149,7 +164,7 @@ def _objects(mesh: MeshData) -> FbxNode:
                     ],
                 )
             )
-        children.append(FbxNode("Pose", [7000, f"Pose::{mesh.name}_bind", "BindPose"]))
+        children.append(FbxNode("Pose", [_id(7000), _name(f"{mesh.name}_bind", "Pose"), "BindPose"]))
     return FbxNode("Objects", children=children)
 
 
@@ -180,19 +195,22 @@ def _bone_weights(mesh: MeshData, bone_index: int) -> tuple[np.ndarray, np.ndarr
 
 def _connections(mesh: MeshData) -> FbxNode:
     children = []
-    for index, _part in enumerate(mesh.parts):
-        children.append(FbxNode("C", ["OO", 2000 + index, 1000]))
+    mesh_model_id = 2000
+    children.append(FbxNode("C", ["OO", _id(1000), _id(mesh_model_id)]))
+    children.append(FbxNode("C", ["OO", _id(mesh_model_id), _id(0)]))
     for index, _material in enumerate(mesh.materials):
-        children.append(FbxNode("C", ["OO", 3000 + index, 1000]))
+        children.append(FbxNode("C", ["OO", _id(3000 + index), _id(mesh_model_id)]))
     for index, bone in enumerate(mesh.bones):
-        children.append(FbxNode("C", ["OO", 4000 + index, 5000 + index]))
+        children.append(FbxNode("C", ["OO", _id(4000 + index), _id(5000 + index)]))
         if bone.parent >= 0:
-            children.append(FbxNode("C", ["OO", 5000 + index, 5000 + bone.parent]))
+            children.append(FbxNode("C", ["OO", _id(5000 + index), _id(5000 + bone.parent)]))
+        else:
+            children.append(FbxNode("C", ["OO", _id(5000 + index), _id(0)]))
     if mesh.bones:
-        children.append(FbxNode("C", ["OO", 6000, 1000]))
+        children.append(FbxNode("C", ["OO", _id(6000), _id(1000)]))
         for bone_index in _used_bones(mesh):
-            children.append(FbxNode("C", ["OO", 6100 + bone_index, 6000]))
-            children.append(FbxNode("C", ["OO", 6100 + bone_index, 5000 + bone_index]))
+            children.append(FbxNode("C", ["OO", _id(5000 + bone_index), _id(6100 + bone_index)]))
+            children.append(FbxNode("C", ["OO", _id(6100 + bone_index), _id(6000)]))
     return FbxNode("Connections", children=children)
 
 
@@ -225,24 +243,24 @@ def write_fbx_bytes(mesh: MeshData) -> bytes:
     return bytes(out)
 
 
-def _parse_prop(data: bytes, offset: int) -> tuple[Any, int]:
+def _parse_prop(data: bytes, offset: int) -> tuple[Any, int, bytes]:
     code = data[offset : offset + 1]
     offset += 1
     if code == b"C":
-        return struct.unpack_from("<?", data, offset)[0], offset + 1
+        return struct.unpack_from("<?", data, offset)[0], offset + 1, code
     if code == b"I":
-        return struct.unpack_from("<i", data, offset)[0], offset + 4
+        return struct.unpack_from("<i", data, offset)[0], offset + 4, code
     if code == b"L":
-        return struct.unpack_from("<q", data, offset)[0], offset + 8
+        return struct.unpack_from("<q", data, offset)[0], offset + 8, code
     if code == b"D":
-        return struct.unpack_from("<d", data, offset)[0], offset + 8
+        return struct.unpack_from("<d", data, offset)[0], offset + 8, code
     if code in (b"S", b"R"):
         length = struct.unpack_from("<I", data, offset)[0]
         offset += 4
         value = data[offset : offset + length]
         if code == b"S":
             value = value.decode("utf-8")
-        return value, offset + length
+        return value, offset + length, code
     if code in (b"d", b"i", b"l"):
         count, encoding, byte_length = struct.unpack_from("<III", data, offset)
         offset += 12
@@ -251,7 +269,7 @@ def _parse_prop(data: bytes, offset: int) -> tuple[Any, int]:
         if encoding == 1:
             payload = zlib.decompress(payload)
         dtype = {"d": "<f8", "i": "<i4", "l": "<i8"}[code.decode("ascii")]
-        return np.frombuffer(payload, dtype=np.dtype(dtype), count=count), offset
+        return np.frombuffer(payload, dtype=np.dtype(dtype), count=count), offset, code
     raise ValueError(f"unsupported FBX property code: {code!r}")
 
 
@@ -276,12 +294,14 @@ def _parse_nodes(data: bytes, offset: int, limit: int) -> tuple[list[FbxNode], i
         name = data[name_start : name_start + name_len].decode("utf-8")
         prop_offset = name_start + name_len
         props = []
+        prop_types = bytearray()
         child_offset = prop_offset + prop_len
         while prop_offset < child_offset:
-            prop, prop_offset = _parse_prop(data, prop_offset)
+            prop, prop_offset, prop_type = _parse_prop(data, prop_offset)
             props.append(prop)
+            prop_types.extend(prop_type)
         children, _ = _parse_nodes(data, child_offset, end_offset - 13)
-        nodes.append(FbxNode(name, props, children))
+        nodes.append(FbxNode(name, props, children, bytes(prop_types)))
         offset = end_offset
     return nodes, offset
 
@@ -321,4 +341,3 @@ def validate_fbx_bytes(fbx_bytes: bytes) -> dict[str, int]:
             if node.name == "Model" and len(node.props) >= 3 and node.props[2] == "LimbNode"
         ),
     }
-

@@ -500,10 +500,11 @@ def materialize_entry_clean_output(
 
 
 def build_parser(default_kind: str | None = None, default_format: str | None = None) -> argparse.ArgumentParser:
+    default_engine = "blender" if default_format in {"fbx", "both"} else "native"
     parser = argparse.ArgumentParser(
         description=(
-            "Export clean OBJ/FBX model folders from GBM lookup CSV files. "
-            "Final output keeps only OBJ, MTL, FBX, and PNG files."
+            "Export clean OBJ/FBX/GLB model folders from GBM lookup CSV files. "
+            "Final output keeps only OBJ, MTL, FBX, GLB, and PNG files."
         )
     )
     if default_kind is None:
@@ -522,7 +523,7 @@ def build_parser(default_kind: str | None = None, default_format: str | None = N
     parser.add_argument(
         "--engine",
         choices=("native", "blender"),
-        default="native",
+        default=default_engine,
         help="native writes OBJ/FBX/GLB in pure Python; blender uses the legacy FBX converter.",
     )
     parser.add_argument(
