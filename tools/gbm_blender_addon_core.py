@@ -15,9 +15,18 @@ from pathlib import Path
 from typing import Iterable
 
 TOOLS_DIR = Path(__file__).resolve().parent
-_IS_BUNDLED_ADDON = (TOOLS_DIR / "__init__.py").is_file() and (
-    TOOLS_DIR / "gbm_blender_addon.py"
-).is_file()
+
+
+def _is_blender_addon_install(tools_dir: Path) -> bool:
+    parts = [part.casefold() for part in tools_dir.parts]
+    try:
+        scripts_idx = parts.index("scripts")
+    except ValueError:
+        return False
+    return scripts_idx + 1 < len(parts) and parts[scripts_idx + 1] == "addons"
+
+
+_IS_BUNDLED_ADDON = _is_blender_addon_install(TOOLS_DIR)
 if _IS_BUNDLED_ADDON:
     PROJECT_DIR = TOOLS_DIR
     WORKSPACE_ROOT = Path.home()
@@ -59,6 +68,31 @@ def require_file(path_text: str, label: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"{label} not found: {path}")
     return path.resolve()
+
+
+def resolve_mfx_path(path_text: str) -> Path:
+    bundled = TOOLS_DIR / "ShaderPackage.mfx"
+    candidates: list[Path] = []
+    if str(path_text).strip():
+        candidates.append(Path(path_text).expanduser())
+    candidates.append(bundled)
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if resolved.is_file():
+            return resolved
+    tried = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        "MFX not found. Copy ShaderPackage.mfx into the add-on folder "
+        f"({bundled}) or set it in the GBM Setup panel. Tried: {tried}"
+    )
 
 
 def safe_name(value: str, fallback: str = "gbm_asset") -> str:

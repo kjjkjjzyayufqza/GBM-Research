@@ -37,10 +37,8 @@ except ModuleNotFoundError as exc:
     missing = exc.name or "gbm_blender_addon_core"
     raise ImportError(
         f"Missing GBM add-on module '{missing}'. "
-        "Do not install gbm_blender_addon.py by itself. "
-        "Install the gbm_arc_tools folder instead "
-        "(run: python tools/build_blender_addon.py, then install gbm_arc_tools.zip "
-        "or the gbm_arc_tools directory in Blender)."
+        "Install tools/blender_addon.zip in Blender, not gbm_blender_addon.py alone. "
+        "Run: python tools/build_blender_addon.py"
     ) from exc
 
 
@@ -186,7 +184,8 @@ def export_objects(
 
 def import_arc_paths(context: bpy.types.Context, arc_paths: list[Path]) -> tuple[int, int]:
     settings = addon_settings(context)
-    mfx_path = core.require_file(settings.mfx_path, "MFX")
+    mfx_path = core.resolve_mfx_path(settings.mfx_path)
+    settings.mfx_path = str(mfx_path)
     work_root = core.require_directory(settings.work_dir, "Work folder")
     prepared = core.prepare_imports_from_arcs(
         arc_paths,
@@ -449,16 +448,25 @@ CLASSES = (
 
 
 def register() -> None:
+    unregister()
     for cls in CLASSES:
-        bpy.utils.register_class(cls)
-    bpy.types.Scene.gbm_arc_tools = PointerProperty(type=GBM_PG_Settings)
+        try:
+            bpy.utils.register_class(cls)
+        except ValueError as exc:
+            if "already registered" not in str(exc).lower():
+                raise
+    if not hasattr(bpy.types.Scene, "gbm_arc_tools"):
+        bpy.types.Scene.gbm_arc_tools = PointerProperty(type=GBM_PG_Settings)
 
 
 def unregister() -> None:
     if hasattr(bpy.types.Scene, "gbm_arc_tools"):
         del bpy.types.Scene.gbm_arc_tools
     for cls in reversed(CLASSES):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError:
+            pass
 
 
 if __name__ == "__main__":

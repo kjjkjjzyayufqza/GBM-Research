@@ -47,6 +47,25 @@ class BlenderAddonCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gbm_blender_addon_core.export_extension("dae")
 
+    def test_resolve_mfx_path_falls_back_from_stale_addon_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "ShaderPackage.mfx"
+            bundled.write_bytes(b"MFX")
+            stale = (
+                Path("C:/Users/example/AppData/Roaming/Blender Foundation")
+                / "Blender/4.2/scripts/addons/gbm_arc_tools/ShaderPackage.mfx"
+            )
+
+            original_tools_dir = gbm_blender_addon_core.TOOLS_DIR
+            gbm_blender_addon_core.TOOLS_DIR = root
+            try:
+                resolved = gbm_blender_addon_core.resolve_mfx_path(str(stale))
+            finally:
+                gbm_blender_addon_core.TOOLS_DIR = original_tools_dir
+
+        self.assertEqual(resolved, bundled.resolve())
+
     @unittest.skipUnless(
         (
             gbm_blender_addon_core.DEFAULT_ARCHIVE_ROOT
