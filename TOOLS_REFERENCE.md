@@ -15,8 +15,8 @@ Runs the current static pipeline by invoking the focused tools in order:
 ```text
 gbm_arc_extract.py
   -> gbm_tex_to_png.py
-  -> gbm_mod_obj_probe.py
-  -> gbm_blender_convert.py
+  -> native MeshData decode
+  -> native OBJ/FBX/GLB writers
 ```
 
 Typical all-model export from the repository root:
@@ -36,10 +36,9 @@ Responsibilities:
 - place all-model outputs under `out\<arc-stem>\models\<unique-model-name>\...`;
 - use `tools\ShaderPackage.mfx` by default for vertex layout decoding;
 - convert TEX files beside the selected MOD to PNG;
-- export bind-pose OBJ;
-- call Blender for static FBX export unless `--skip-fbx` is passed.
-- when one ARC contains multiple models, call Blender once with a batch manifest
-  instead of starting a new Blender process per model.
+- decode MOD bind-pose geometry once into in-memory MeshData;
+- write OBJ/MTL, FBX, and GLB natively by default;
+- keep Blender as an opt-in fallback with `--engine blender`.
 
 Useful options:
 
@@ -48,6 +47,8 @@ Useful options:
 | `--model-stem` | Restrict export to one model stem such as `ma320900` |
 | `--mfx` | Override the default `tools\ShaderPackage.mfx` path |
 | `--limit` | Partial extraction limit passed to the ARC extractor |
+| `--engine` | `native` by default; use `blender` for the legacy converter |
+| `--format` | Native comma-separated formats: `obj,fbx,gltf` by default |
 | `--blender` | Blender executable path |
 | `--skip-fbx` | Stop after PNG and OBJ output |
 | `--force` | Delete the output root before running |
@@ -63,7 +64,7 @@ Use it when you have an archive folder such as:
 E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ma
 ```
 
-Export every model under that tree to OBJ plus FBX:
+Export every model under that tree to native OBJ, FBX, and GLB:
 
 ```powershell
 python .\tools\gbm_batch.py `
@@ -102,7 +103,8 @@ out\ma_batch\m800\m810a05_night\
       fbx\
 ```
 
-When FBX export is enabled, `gbm_batch.py` writes `_gbm_blender_jobs.json` and
+Use `--engine blender --format fbx` to route FBX through the legacy Blender
+converter. In that mode, `gbm_batch.py` writes `_gbm_blender_jobs.json` and
 starts Blender once for all queued FBX jobs.
 
 Drag/drop helpers are available at the repository root:
@@ -216,6 +218,28 @@ writes `<mod stem>.obj` inside it.
 
 `gbm_start.py` intentionally uses `--axis-mode engine` for this intermediate
 OBJ so the Blender conversion stage can own the DCC-axis correction.
+
+## `tools\gbm_native_convert.py`
+
+Converts one MOD to OBJ/MTL, FBX, and GLB without Blender.
+
+Responsibilities:
+
+- decode MOD geometry, materials, skeleton, and skin weights into `MeshData`;
+- bake the shared Blender-space orientation once;
+- build output bytes in memory;
+- self-check OBJ, GLB, and FBX structure before writing final files.
+
+Example:
+
+```powershell
+python .\tools\gbm_native_convert.py .\out\sample\extracted\character\chr210100\mod\chr210100.mod `
+  --mfx .\tools\ShaderPackage.mfx `
+  --mrl .\out\sample\extracted\character\chr210100\mod\chr210100.mrl `
+  --png-dir .\out\sample\models\png `
+  -o .\out\sample\models\chr210100 `
+  --format obj,fbx,gltf
+```
 
 ## `tools\gbm_blender_convert.py`
 

@@ -16,7 +16,7 @@ Related docs:
 |---|---|---|---|
 | `ARCC` | `.arc` | DLC archive container | extracted |
 | `TEX ` | `.tex` | texture resource | PNG conversion for observed formats |
-| `MOD\0` | `.mod` | model geometry and skeleton data | bind-pose OBJ export |
+| `MOD\0` | `.mod` | model geometry and skeleton data | native bind-pose OBJ/FBX/GLB export |
 | `MRL\0` | `.mrl` | material resource list | paths and references inspected |
 | `MFX\0` | `.mfx` | shader package and input layouts | input layouts parsed |
 | `LMT\0` | `.lmt` | motion list | deferred |

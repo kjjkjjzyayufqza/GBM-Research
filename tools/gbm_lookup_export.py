@@ -57,7 +57,7 @@ RESERVED_WINDOWS_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
-STATIC_OUTPUT_SUFFIXES = {".obj", ".mtl", ".fbx", ".png"}
+STATIC_OUTPUT_SUFFIXES = {".obj", ".mtl", ".fbx", ".glb", ".png"}
 SKIP_ARCHIVE_SUFFIXES = ("_mot", "_vfx")
 PROGRESS_WIDTH = 24
 _ACTIVE_COMMAND_TIMINGS: contextvars.ContextVar[list[tuple[str, int]] | None] = (
@@ -72,6 +72,7 @@ _CANCEL_REQUESTED = threading.Event()
 class LookupExportEntry:
     serial_name: str
     safe_serial_name: str
+    output_name: str
     archive_ref: str
     archive_path: Path
     row_index: int
@@ -178,6 +179,7 @@ def read_lookup_entries(
 ) -> list[LookupExportEntry]:
     entries: list[LookupExportEntry] = []
     seen: set[tuple[str, str]] = set()
+    output_name_counts: dict[str, int] = {}
 
     with csv_path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
@@ -194,10 +196,18 @@ def read_lookup_entries(
                 if key in seen:
                     continue
                 seen.add(key)
+                duplicate_index = output_name_counts.get(safe_serial_name.casefold(), 0)
+                output_name_counts[safe_serial_name.casefold()] = duplicate_index + 1
+                output_name = (
+                    safe_serial_name
+                    if duplicate_index == 0
+                    else f"{safe_serial_name}_{duplicate_index}"
+                )
                 entries.append(
                     LookupExportEntry(
                         serial_name=serial_name,
                         safe_serial_name=safe_serial_name,
+                        output_name=output_name,
                         archive_ref=archive_ref,
                         archive_path=resolve_archive_path(archive_root, archive_ref),
                         row_index=row_index,
@@ -441,11 +451,11 @@ def materialize_entry_clean_output(
 ) -> int:
     copied_models = 0
     output_root = category_root.parent
-    # All archives of one serial flatten into a single <serial>/ folder; each
+    # All archives of one output entry flatten into a single <output_name>/ folder; each
     # model keeps its own chr stem (e.g. RX-78-2/chr210100, RX-78-2/chr290600).
     # Different archives carry distinct chr stems, so they never collide; any
     # genuine clash is disambiguated by unique_child_path.
-    output_key = entry.safe_serial_name.casefold()
+    output_key = entry.output_name.casefold()
     arc_models_root = (
         work_root / entry.safe_serial_name / entry.archive_path.stem / "models"
     )
@@ -463,7 +473,7 @@ def materialize_entry_clean_output(
         return copied_models
 
     category_root.mkdir(parents=True, exist_ok=True)
-    serial_output = category_root / entry.safe_serial_name
+    serial_output = category_root / entry.output_name
     if output_key not in initialized_outputs:
         reset_directory(serial_output, output_root)
         initialized_outputs.add(output_key)
@@ -506,10 +516,15 @@ def build_parser(default_kind: str | None = None, default_format: str | None = N
     if default_format is None:
         parser.add_argument(
             "--format",
-            choices=("obj", "fbx", "both"),
-            default="fbx",
-            help="obj writes OBJ/MTL/PNG only; fbx/both also writes FBX.",
+            default="obj,fbx,gltf",
+            help="Native comma-separated output formats: obj,fbx,gltf. Blender accepts obj, fbx, or both.",
         )
+    parser.add_argument(
+        "--engine",
+        choices=("native", "blender"),
+        default="native",
+        help="native writes OBJ/FBX/GLB in pure Python; blender uses the legacy FBX converter.",
+    )
     parser.add_argument(
         "archive_root",
         nargs="?",
@@ -607,6 +622,7 @@ def export_one_entry(
     lod: int,
     want_preview: bool,
     want_report: bool,
+    engine: str = "native",
 ) -> EntryRunResult:
     entry_started = time.perf_counter()
     with collect_command_timings() as timings:
@@ -621,6 +637,7 @@ def export_one_entry(
             want_report=want_report,
             limit=None,
             dry_run=False,
+            engine=engine,
         )
     return EntryRunResult(
         entry=entry,
@@ -675,6 +692,11 @@ def run(args: argparse.Namespace) -> ExportRunResult:
     export_format = args.default_format or args.format
     if export_format == "both":
         export_format = "fbx"
+    engine = getattr(
+        args,
+        "engine",
+        "blender" if getattr(args, "default_format", None) in {"fbx", "both"} else "native",
+    )
 
     archive_root = args.archive_root.resolve()
     output_root = args.output.resolve()
@@ -715,7 +737,7 @@ def run(args: argparse.Namespace) -> ExportRunResult:
     elif args.dry_run:
         preview_entries = [
             {
-                "output_name": entry.safe_serial_name,
+                "output_name": entry.output_name,
                 "archive_ref": entry.archive_ref,
                 "model_id": entry.model_id,
                 "part_type": entry.part_type,
@@ -759,6 +781,8 @@ def run(args: argparse.Namespace) -> ExportRunResult:
         ) -> None:
             nonlocal model_count
             if result.jobs:
+                if engine != "blender":
+                    raise ValueError("native export unexpectedly returned Blender jobs")
                 print_progress(
                     index,
                     len(entries),
@@ -800,6 +824,7 @@ def run(args: argparse.Namespace) -> ExportRunResult:
                     lod=args.lod,
                     want_preview=args.preview,
                     want_report=args.report,
+                    engine=engine,
                 )
                 complete_entry(index, entry, result)
         else:
@@ -812,6 +837,7 @@ def run(args: argparse.Namespace) -> ExportRunResult:
                     lod=args.lod,
                     want_preview=args.preview,
                     want_report=args.report,
+                    engine=engine,
                 )
 
             def on_complete(

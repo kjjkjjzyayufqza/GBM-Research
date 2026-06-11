@@ -29,6 +29,7 @@ from gbm_start import (  # noqa: E402
     select_mod_paths,
     unique_model_directory_names,
 )
+from gbm_native_convert import convert_mod_native, parse_formats  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class ModelExport:
     fbx: Path | None
     preview: Path | None
     report: Path | None
+    glb: Path | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,9 +80,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=("obj", "fbx"),
-        default="fbx",
-        help="Export OBJ only, or OBJ plus FBX. Defaults to fbx.",
+        default="obj,fbx,gltf",
+        help="Native comma-separated output formats: obj,fbx,gltf. Blender accepts obj or fbx.",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=("native", "blender"),
+        default="native",
+        help="native writes OBJ/FBX/GLB in pure Python; blender uses the legacy FBX converter.",
     )
     parser.add_argument(
         "--mfx",
@@ -148,6 +155,8 @@ def prepare_model_export(
     lod: int,
     want_preview: bool,
     want_report: bool,
+    engine: str = "native",
+    native_formats: tuple[str, ...] = ("obj", "fbx", "glb"),
 ) -> tuple[ModelExport | None, BlenderJob | None]:
     model_stem = mod_path.stem
     obj_dir = model_root / "obj"
@@ -158,6 +167,39 @@ def prepare_model_export(
     mrl_path = mod_path.with_suffix(".mrl")
     if not mrl_path.exists():
         raise FileNotFoundError(f"MRL not found for {mod_path}: {mrl_path}")
+
+    if engine == "native":
+        result = convert_mod_native(
+            mod_path,
+            model_root,
+            mfx_path=mfx_path,
+            mrl_path=mrl_path,
+            png_dir=png_dir,
+            formats=native_formats,
+            lod=lod,
+        )
+        report_path = fbx_dir / f"{model_stem}_native_report.json" if want_report else None
+        if report_path is not None:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(asdict(result), indent=2, default=str),
+                encoding="utf-8",
+            )
+        return (
+            ModelExport(
+                arc=arc_path,
+                model_stem=model_stem,
+                model_output_root=model_root,
+                mod=mod_path,
+                mrl=mrl_path,
+                obj=result.obj or obj_path,
+                fbx=result.fbx,
+                preview=None,
+                report=report_path,
+                glb=result.glb,
+            ),
+            None,
+        )
 
     run_command(
         obj_probe_command(
@@ -241,6 +283,7 @@ def export_all_models(
     want_report: bool,
     limit: int | None,
     dry_run: bool,
+    engine: str = "native",
 ) -> tuple[list[ModelExport], list[BlenderJob], list[dict[str, str]]]:
     model_exports: list[ModelExport] = []
     blender_jobs: list[BlenderJob] = []
@@ -283,7 +326,9 @@ def export_all_models(
                     lod=lod,
                     want_preview=want_preview,
                     want_report=want_report,
-                )
+                    engine=engine,
+                    native_formats=parse_formats(export_format),
+            )
             except Exception as exc:
                 failure = {
                     "arc": str(arc_path),
@@ -371,12 +416,13 @@ def main() -> int:
             want_report=args.report,
             limit=args.limit,
             dry_run=args.dry_run,
+            engine=args.engine,
         )
         model_exports.extend(batch_exports)
         blender_jobs.extend(batch_jobs)
         failures.extend(batch_failures)
 
-    if not args.extract_only:
+    if not args.extract_only and args.engine == "blender":
         run_blender_batch(
             output_root=output_root,
             blender_path=args.blender.resolve(),

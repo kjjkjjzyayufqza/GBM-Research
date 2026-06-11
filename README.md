@@ -19,8 +19,8 @@ Reproducible static extraction pipeline:
 GBM DLC .arc
   -> decrypted and decompressed native resources
   -> TEX textures converted to PNG
-  -> MOD bind-pose geometry exported to OBJ
-  -> OBJ plus PNG textures converted to static FBX with Blender
+  -> MOD bind-pose geometry decoded once in Python
+  -> native OBJ, FBX, and GLB written from in-memory mesh data
 ```
 
 The validated sample path is `ch/320900.arc`. The MOD stores 52,667 vertices
@@ -60,15 +60,16 @@ python --version
 python -m pip install pycryptodome pillow texture2ddecoder
 ```
 
-Blender is required for FBX export and preview rendering. Blender 4.2 was used
-for validation:
+Blender is no longer required for default static export. The native engine writes
+OBJ, FBX, and GLB directly in Python. Blender 4.2 remains supported as an
+opt-in fallback for the legacy FBX path and preview rendering:
 
 ```text
 C:\Program Files\Blender Foundation\Blender 4.2\blender.exe
 ```
 
-The Python tools can still produce extracted resources, PNGs, and OBJ files
-without Blender by passing `--skip-fbx` to `gbm_start.py`.
+Pass `--engine blender` to use the legacy converter. Pass `--skip-fbx` to write
+OBJ only.
 
 The static model decoder also needs `ShaderPackage.mfx`. `gbm_start.py` uses
 `tools/ShaderPackage.mfx` by default. If that file is missing, copy it from the
@@ -121,11 +122,10 @@ out/12235/
       obj/
         chr122350.obj
         chr122350.mtl
-        chr122350_obj_manifest.json
       fbx/
         chr122350.fbx
-        chr122350_BM.png
-        chr122350_NM.png
+      gltf/
+        chr122350.glb
     chr122351/
       obj/
         ...
@@ -144,9 +144,9 @@ See [MRL_MFX_MATERIALS.md](MRL_MFX_MATERIALS.md).
 If multiple `.mod` files share the same stem, later folders are suffixed as
 `__2`, `__3`, and so on.
 
-The preview PNG and FBX report are off by default. Add `--preview` to render
-`<model>_preview.png` and `--report` to write `<model>_fbx_report.json` next to
-each FBX.
+The native engine validates OBJ/FBX/GLB bytes before writing final files. Add
+`--report` to write the native validation report. Preview rendering requires the
+legacy Blender engine.
 
 **Preview without writing files:**
 
@@ -166,12 +166,13 @@ python .\tools\gbm_start.py `
   --skip-fbx
 ```
 
-**Custom Blender executable:**
+**Use the legacy Blender FBX converter:**
 
 ```powershell
 python .\tools\gbm_start.py `
   E:\research\Gundam_Breaker_Mobile\com.bandainamcoent.gb_jp\files\dlc\archive\ch\12235.arc `
   -o .\out\12235 `
+  --engine blender `
   --blender 'D:\Tools\Blender\blender.exe'
 ```
 
@@ -192,9 +193,9 @@ gbm_start.py
   2. reads the extraction manifest
   3. exports every discovered MOD (or one MOD when `--model-stem` is provided)
   4. calls gbm_tex_to_png.py on the MOD directory
-  5. calls gbm_mod_obj_probe.py
-  6. optionally calls Blender with gbm_blender_convert.py; multi-model runs use
-     one Blender batch process
+  5. decodes each MOD into in-memory MeshData
+  6. writes OBJ/MTL, FBX, and GLB natively, or uses Blender when
+     `--engine blender` is selected
 ```
 
 Options:
@@ -206,6 +207,8 @@ Options:
 | `-o`, `--output` | no | Output root; defaults to `out/<arc-stem>` |
 | `--model-stem` | no | Optional. Restrict export to one known model stem. Omit this in normal use: you usually only have the `.arc` name, not internal stems like `ma320900`. Check `extracted/_manifest.json` after the first run if you need the exact names |
 | `--limit` | no | Extract only the first N archive entries |
+| `--engine` | no | `native` by default; use `blender` for the legacy converter |
+| `--format` | no | Native comma-separated formats: `obj,fbx,gltf` by default |
 | `--blender` | no | Blender executable path |
 | `--skip-fbx` | no | Stop after PNG and OBJ output |
 | `--lod` | no | LOD level for OBJ and FBX export (0, 1, 2). 0 is highest detail |

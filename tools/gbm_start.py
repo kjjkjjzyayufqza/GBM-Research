@@ -21,6 +21,11 @@ DEFAULT_BLENDER = Path(r"C:\Program Files\Blender Foundation\Blender 4.2\blender
 TOOLS_DIR = Path(__file__).resolve().parent
 DEFAULT_MFX = TOOLS_DIR / "ShaderPackage.mfx"
 
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from gbm_native_convert import convert_mod_native, parse_formats  # noqa: E402
+
 
 @dataclass
 class PipelinePaths:
@@ -37,6 +42,7 @@ class PipelinePaths:
     preview_path: Path
     obj_path: Path
     fbx_path: Path
+    glb_path: Path
 
 
 @dataclass(frozen=True)
@@ -95,7 +101,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-fbx",
         action="store_true",
-        help="Stop after TEX->PNG and MOD->OBJ; do not call Blender.",
+        help="Stop after TEX->PNG and MOD->OBJ.",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=("native", "blender"),
+        default="native",
+        help="native writes OBJ/FBX/GLB in pure Python; blender uses the legacy FBX converter.",
+    )
+    parser.add_argument(
+        "--format",
+        default="obj,fbx,gltf",
+        help="Native comma-separated output formats: obj,fbx,gltf. Defaults to all.",
     )
     add_export_options(parser)
     parser.add_argument(
@@ -157,6 +174,7 @@ def build_paths(
         preview_path=fbx_dir / f"{model_stem}_preview.png",
         obj_path=obj_dir / f"{model_stem}.obj",
         fbx_path=fbx_dir / f"{model_stem}.fbx",
+        glb_path=artifact_root / "gltf" / f"{model_stem}.glb",
     )
 
 
@@ -449,6 +467,8 @@ def print_planned_followup_commands(
     blender_path: Path,
     skip_fbx: bool,
     lod: int,
+    engine: str = "native",
+    native_format: str = "obj,fbx,gltf",
 ) -> None:
     if not model_stem:
         print(
@@ -472,6 +492,26 @@ def print_planned_followup_commands(
             tex_to_png_command(assumed_mod.parent, paths.png_dir, paths.tex_manifest_path)
         )
     )
+    if engine == "native":
+        command = [
+            sys.executable,
+            str(TOOLS_DIR / "gbm_native_convert.py"),
+            str(assumed_mod),
+            "--mfx",
+            str(mfx_path),
+            "--mrl",
+            str(assumed_mrl),
+            "--png-dir",
+            str(paths.png_dir),
+            "-o",
+            str(paths.artifact_root),
+            "--format",
+            "obj" if skip_fbx else native_format,
+            "--lod",
+            str(lod),
+        ]
+        print(format_command(command))
+        return
     print(
         format_command(
             obj_probe_command(
@@ -506,6 +546,8 @@ def run_model_pipeline(
     skip_fbx: bool,
     want_preview: bool,
     want_report: bool,
+    engine: str = "native",
+    native_formats: tuple[str, ...] = ("obj", "fbx", "glb"),
 ) -> dict[str, object]:
     model_stem = mod_path.stem
     artifact_root = (
@@ -520,6 +562,37 @@ def run_model_pipeline(
     mrl_path = mod_path.with_suffix(".mrl")
     if not mrl_path.exists():
         raise FileNotFoundError(f"MRL not found for {mod_path}: {mrl_path}")
+
+    if engine == "native":
+        formats = ("obj",) if skip_fbx else native_formats
+        native_result = convert_mod_native(
+            mod_path,
+            paths.artifact_root,
+            mfx_path=mfx_path,
+            mrl_path=mrl_path,
+            png_dir=paths.png_dir,
+            formats=formats,
+            lod=lod,
+        )
+        if want_report:
+            paths.fbx_report_path.parent.mkdir(parents=True, exist_ok=True)
+            paths.fbx_report_path.write_text(
+                json.dumps(asdict(native_result), indent=2, default=str),
+                encoding="utf-8",
+            )
+        return {
+            "model_stem": model_stem,
+            "model_output_root": str(paths.artifact_root),
+            "mod": str(mod_path),
+            "mrl": str(mrl_path),
+            "lod": lod,
+            "engine": "native",
+            "obj": str(native_result.obj) if native_result.obj else None,
+            "fbx": str(native_result.fbx) if native_result.fbx else None,
+            "glb": str(native_result.glb) if native_result.glb else None,
+            "preview": None,
+            "report": str(paths.fbx_report_path) if want_report else None,
+        }
 
     run_command(
         obj_probe_command(
@@ -540,8 +613,10 @@ def run_model_pipeline(
         "mod": str(mod_path),
         "mrl": str(mrl_path),
         "lod": lod,
+        "engine": "blender",
         "obj": str(paths.obj_path),
         "fbx": None,
+        "glb": None,
         "preview": None,
         "report": None,
     }
@@ -604,12 +679,14 @@ def main() -> int:
             args.blender.resolve(),
             args.skip_fbx,
             args.lod,
+            args.engine,
+            args.format,
         )
         print(json.dumps({"planned": asdict(paths)}, indent=2, default=str))
         return 0
 
     blender_path = args.blender.resolve()
-    if not args.skip_fbx and not blender_path.exists():
+    if args.engine == "blender" and not args.skip_fbx and not blender_path.exists():
         raise FileNotFoundError(
             f"Blender executable not found: {blender_path}. "
             "Use --blender or --skip-fbx."
@@ -640,13 +717,16 @@ def main() -> int:
             skip_fbx=args.skip_fbx,
             want_preview=args.preview,
             want_report=args.report,
+            engine=args.engine,
+            native_formats=parse_formats(args.format),
         )
         blender_job = result.pop("_blender_job", None)
         if isinstance(blender_job, BlenderJob):
             blender_jobs.append(blender_job)
         results.append(result)
 
-    run_blender_batch(output_root, blender_path, blender_jobs)
+    if args.engine == "blender":
+        run_blender_batch(output_root, blender_path, blender_jobs)
 
     if len(results) == 1:
         result = dict(results[0])
